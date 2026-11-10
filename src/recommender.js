@@ -10,9 +10,14 @@
  *  4. Честный к маленьким артистам: у треков с малым числом прослушиваний есть
  *     бонус исследования, иначе новые авторы никогда не попадут в рекомендации.
  *  5. Объяснимый: у каждого трека есть список причин, почему он в волне.
+ *  6. Слышит звук: помнит, как звучит то, что вам нравится (темп, энергия, ударность),
+ *     и находит похожее даже без тегов.
+ *  7. Чувствует контекст: утром, ночью и в выходные вкус разный — волна это учитывает.
  *
  * Модуль чистый (без БД и I/O) — его легко тестировать и потом вынести в отдельный сервис.
  */
+
+import { soundSimilarity, centroid, lerpSound, describeSound } from './sound.js';
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -41,23 +46,84 @@ export function classifyEvent(e) {
 export const decay = (ts, now) => Math.pow(0.5, Math.max(0, now - ts) / HALF_LIFE);
 
 /** Сводит события и реакции пользователя в одну оценку на трек. */
-export function buildUserSignals({ events = [], reactions = [], now = Date.now() }) {
+export function buildUserSignals({ events = [], reactions = [], now = Date.now(), weightAt = null }) {
   const signal = new Map();
+  const k = (ts) => (weightAt ? weightAt(ts) : 1);
   const heard = new Map(); // trackId -> время последнего прослушивания
   const add = (id, w) => signal.set(id, (signal.get(id) ?? 0) + w);
 
   for (const e of events) {
     const w = EVENT_WEIGHTS[classifyEvent(e)];
     if (w === undefined) continue;
-    add(e.track_id, w * decay(e.created_at, now));
+    add(e.track_id, w * decay(e.created_at, now) * k(e.created_at));
     heard.set(e.track_id, Math.max(heard.get(e.track_id) ?? 0, e.created_at));
   }
   for (const r of reactions) {
     // явные оценки «липкие»: затухают максимум вдвое
     const w = r.value > 0 ? LIKE_WEIGHT : r.value < 0 ? DISLIKE_WEIGHT : 0;
-    if (w) add(r.track_id, w * Math.max(0.5, decay(r.created_at, now)));
+    if (w) add(r.track_id, w * Math.max(0.5, decay(r.created_at, now)) * k(r.created_at));
   }
   return { signal, heard };
+}
+
+// ---------- Контекст: время суток и выходные ----------
+
+/** Местные час и признак выходного. tzOffset — как Date#getTimezoneOffset() (минуты, UTC − местное). */
+export function localTime(ts, tzOffset = 0) {
+  const local = ts - tzOffset * 60_000;
+  const hour = (((local / HOUR) % 24) + 24) % 24;
+  const weekday = (Math.floor(local / DAY) + 4) % 7; // 1970-01-01 — четверг; 0 — воскресенье
+  return { hour, weekend: weekday === 0 || weekday === 6 };
+}
+
+export function slotName(hour) {
+  if (hour < 5 || hour >= 23) return 'ночью';
+  if (hour < 12) return 'утром';
+  if (hour < 18) return 'днём';
+  return 'вечером';
+}
+
+/**
+ * Насколько момент ts похож на целевой контекст: гауссово ядро по кругу часов (σ = 2.5 ч)
+ * и множитель 0.6, если не совпадает тип дня (будни/выходные).
+ */
+export function contextKernel(target, tzOffset = 0) {
+  return (ts) => {
+    const t = localTime(ts, tzOffset);
+    let dh = Math.abs(t.hour - target.hour);
+    dh = Math.min(dh, 24 - dh);
+    return Math.exp(-(dh * dh) / (2 * 2.5 * 2.5)) * (t.weekend === target.weekend ? 1 : 0.6);
+  };
+}
+
+/** Сигналы, взвешенные по похожести контекста. confidence — сколько «похожих моментов» набралось. */
+export function buildContextSignals({ events = [], reactions = [], now, target, tzOffset }) {
+  const kernel = contextKernel(target, tzOffset);
+  const { signal } = buildUserSignals({ events, reactions, now, weightAt: kernel });
+  let mass = 0;
+  for (const e of events) mass += kernel(e.created_at);
+  for (const r of reactions) mass += kernel(r.created_at);
+  return { signal, confidence: Math.min(1, mass / 8) };
+}
+
+/** Звуковой профиль: центр «нравится» и центр «не нравится». */
+export function buildSoundProfile(signal, trackById) {
+  const pos = [];
+  const neg = [];
+  for (const [id, w] of signal) {
+    const f = trackById.get(id)?.features;
+    if (!f) continue;
+    if (w > 0) pos.push([f, w]);
+    else if (w < 0) neg.push([f, -w]);
+  }
+  return { like: centroid(pos), dislike: centroid(neg) };
+}
+
+function soundScore(f, profile) {
+  if (!f || !profile.like) return 0;
+  let s = soundSimilarity(f, profile.like);
+  if (profile.dislike) s -= 0.5 * Math.max(0, soundSimilarity(f, profile.dislike));
+  return Math.max(-1, Math.min(1, s));
 }
 
 function normalizeMap(map) {
@@ -121,11 +187,27 @@ export function applyTagOverrides(tagProfile, overrides = new Map()) {
 export function buildContext({
   userId, tracks, events = [], reactions = [], allLikes = [], stats = new Map(),
   follows = new Set(), settings = {}, tagOverrides = new Map(), exclude = new Set(), now = Date.now(),
+  tzOffset = 0,
 }) {
   const trackById = new Map(tracks.map((t) => [t.id, t]));
   const { signal, heard } = buildUserSignals({ events, reactions, now });
   const profile = buildProfiles(signal, trackById);
   profile.tags = applyTagOverrides(profile.tags, tagOverrides);
+  const sound = buildSoundProfile(signal, trackById);
+
+  // Контекстный профиль: что вы слушаете именно в такое время
+  const target = localTime(now, tzOffset);
+  let context = { confidence: 0, target, tags: new Map(), sound: { like: null, dislike: null } };
+  if (settings.context !== 0 && settings.context !== false) {
+    const cs = buildContextSignals({ events, reactions, now, target, tzOffset });
+    const cp = buildProfiles(cs.signal, trackById);
+    context = {
+      confidence: cs.confidence,
+      target,
+      tags: applyTagOverrides(cp.tags, tagOverrides),
+      sound: buildSoundProfile(cs.signal, trackById),
+    };
+  }
   const { co, likeCount } = buildCoLikes(allLikes.filter((l) => l.user_id !== userId));
 
   let maxPos = 0;
@@ -142,7 +224,7 @@ export function buildContext({
   }
 
   return {
-    userId, tracks, trackById, signal, heard, profile, co, likeCount, seeds, popRaw, maxPop, stats, follows,
+    userId, tracks, trackById, signal, heard, profile, sound, context, co, likeCount, seeds, popRaw, maxPop, stats, follows,
     exclude, now, tagOverrides,
     disliked: new Set(reactions.filter((r) => r.value < 0).map((r) => r.track_id)),
     blockedTags: new Set([...tagOverrides].filter(([, a]) => a === 'block').map(([t]) => t)),
@@ -165,10 +247,21 @@ export function scoreTrack(t, ctx, rng = Math.random) {
   const s = ctx.stats.get(t.id) ?? {};
   const parts = {};
 
-  // 1. Совпадение по тегам
-  let tagSum = 0;
-  for (const tag of t.tags) tagSum += profile.tags.get(tag) ?? 0;
-  parts.tags = t.tags.length ? clamp(tagSum / Math.sqrt(t.tags.length), -1, 1) : 0;
+  // 1. Совпадение по тегам — общее и «в этом контексте» (время суток, выходные)
+  const tagMatch = (map) => {
+    let sum = 0;
+    for (const tag of t.tags) sum += map.get(tag) ?? 0;
+    return t.tags.length ? clamp(sum / Math.sqrt(t.tags.length), -1, 1) : 0;
+  };
+  const cw = 0.5 * ctx.context.confidence; // доля контекста растёт по мере накопления данных
+  parts.tagsGeneral = tagMatch(profile.tags);
+  parts.tagsContext = cw ? tagMatch(ctx.context.tags) : 0;
+  parts.tags = (1 - cw) * parts.tagsGeneral + cw * parts.tagsContext;
+
+  // 1б. Звучание: похоже ли на то, что нравится (работает и для треков без тегов)
+  parts.soundGeneral = soundScore(t.features, ctx.sound);
+  parts.soundContext = cw ? soundScore(t.features, ctx.context.sound) : 0;
+  parts.sound = (1 - cw) * parts.soundGeneral + cw * parts.soundContext;
 
   // 2. Коллаборативный сигнал
   let collab = 0;
@@ -190,7 +283,7 @@ export function scoreTrack(t, ctx, rng = Math.random) {
   parts.artist = profile.artists.get(t.user_id) ?? 0;
   parts.follow = ctx.follows.has(t.user_id) ? 0.35 : 0;
 
-  let score = ctx.confidence * (1.0 * parts.tags + 0.9 * parts.collab + 0.5 * parts.artist) + parts.follow;
+  let score = ctx.confidence * (1.0 * parts.tags + 0.7 * parts.sound + 0.9 * parts.collab + 0.5 * parts.artist) + parts.follow;
 
   // 4. Качество (байесовская «дослушиваемость») и популярность
   const quality =
@@ -248,8 +341,17 @@ function diversify(scored, count) {
 
 export function describeProfile(ctx) {
   const entries = [...ctx.profile.tags];
+  const ctxTags = [...ctx.context.tags].filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).slice(0, 5);
   return {
     confidence: ctx.confidence,
+    sound: ctx.sound.like ? { ...ctx.sound.like, text: describeSound(ctx.sound.like) } : null,
+    context: {
+      slot: slotName(ctx.context.target.hour),
+      weekend: ctx.context.target.weekend,
+      confidence: Math.round(ctx.context.confidence * 100) / 100,
+      topTags: ctxTags,
+      sound: ctx.context.sound.like ? describeSound(ctx.context.sound.like) : null,
+    },
     topTags: entries.filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).slice(0, 12),
     avoidTags: entries.filter(([, v]) => v < 0).sort((a, b) => a[1] - b[1]).slice(0, 8),
     // треки, сильнее всего повлиявшие на вкус — их можно «забыть»
@@ -308,14 +410,28 @@ export function bridge(params) {
   const sim = tagSimilarity(params.tracks);
   const affinity = (t, tag) => t.tags.reduce((m, x) => Math.max(m, sim(x, tag)), 0);
 
+  // «Как звучит» каждый конец моста — средние признаки треков с этим тегом
+  const soundOf = (tag) => centroid(params.tracks.filter((t) => t.features && t.tags.includes(tag)).map((t) => [t.features, 1]));
+  const soundFrom = soundOf(from);
+  const soundTo = soundOf(to);
+  const hasSound = Boolean(soundFrom && soundTo);
+
   const candidates = [];
   for (const t of params.tracks) {
     const c = scoreTrack(t, ctx, rng);
     if (!c) continue;
     c.aFrom = affinity(t, from);
     c.aTo = affinity(t, to);
-    // на мосту только треки, заметно связанные хотя бы с одним из концов
-    if (Math.max(c.aFrom, c.aTo) >= 0.5) candidates.push(c);
+    const tagLinked = Math.max(c.aFrom, c.aTo) >= 0.5;
+    // трек без нужных тегов, но звучащий как один из концов, тоже может попасть на мост
+    // (сравниваем с точками на всём пути — «середина» не похожа ни на один из концов)
+    let soundLinked = false;
+    if (hasSound && t.features) {
+      for (let a = 0; a <= 1.001 && !soundLinked; a += 0.25) {
+        soundLinked = soundSimilarity(t.features, lerpSound(soundFrom, soundTo, a)) >= 0.6;
+      }
+    }
+    if (tagLinked || soundLinked) candidates.push({ ...c, tagLinked });
   }
 
   const steps = Math.max(2, Math.min(30, length));
@@ -324,27 +440,32 @@ export function bridge(params) {
   let prevArtist = null;
   for (let i = 0; i < steps; i++) {
     const alpha = i / (steps - 1);
+    const target = hasSound ? lerpSound(soundFrom, soundTo, alpha) : null;
     let best = null;
     let bestFit = -Infinity;
     for (const c of candidates) {
       if (used.has(c.track.id)) continue;
-      // хотим, чтобы «доля from» и «доля to» трека совпадали с нужной точкой пути
-      // + сила связи с маршрутом: прямой тег важнее косвенного сходства
+      const soundFit = target && c.track.features ? soundSimilarity(c.track.features, target) : 0;
+      if (!c.tagLinked && soundFit < 0.6) continue; // без тегов — только если точно звучит «по пути»
+      // хотим, чтобы «доля from» и «доля to» трека совпадали с нужной точкой пути,
+      // звучание было близко к промежуточной точке, а связь с маршрутом — сильной
       const fit = 1.5 - Math.abs(c.aFrom - (1 - alpha)) - Math.abs(c.aTo - alpha)
-        + 0.5 * (c.aFrom + c.aTo) + 0.25 * c.score - (c.track.user_id === prevArtist ? 0.5 : 0);
+        + 0.5 * (c.aFrom + c.aTo) + 0.8 * soundFit + 0.25 * c.score
+        - (c.track.user_id === prevArtist ? 0.5 : 0);
       if (fit > bestFit) [bestFit, best] = [fit, c];
     }
     if (!best) break;
     used.add(best.track.id);
     prevArtist = best.track.user_id;
     const pct = Math.round(alpha * 100);
+    const step = `Мост #${from} → #${to}: шаг ${i + 1} из ${steps} (${pct}% пути${target?.bpm ? `, цель ~${target.bpm} BPM` : ''})`;
     items.push({
       track: best.track,
       score: Math.round(bestFit * 1000) / 1000,
-      reasons: [`Мост #${from} → #${to}: шаг ${i + 1} из ${steps} (${pct}% пути)`, ...explain(best, ctx).slice(0, 1)],
+      reasons: [step, ...explain(best, ctx).slice(0, 1)],
     });
   }
-  return { items, profile: describeProfile(ctx) };
+  return { items, profile: describeProfile(ctx), path: hasSound ? { from: describeSound(soundFrom), to: describeSound(soundTo) } : null };
 }
 
 function explain(c, ctx) {
@@ -357,6 +478,14 @@ function explain(c, ctx) {
     const liked = t.tags.filter((tag) => !boostedTags.has(tag) && (profile.tags.get(tag) ?? 0) > 0.15).slice(0, 3);
     if (liked.length) reasons.push(`Похоже на то, что вам нравится: ${liked.map((x) => '#' + x).join(' ')}`);
   }
+  // «в это время вы слушаете такое»: контекстных данных достаточно и трек в них явно попадает
+  if (ctx.context.confidence >= 0.3 && parts.tagsContext > 0.5 && parts.tagsContext >= parts.tagsGeneral - 0.05) {
+    const when = `${slotName(ctx.context.target.hour)}${ctx.context.target.weekend ? ' в выходные' : ''}`;
+    reasons.push(`Вы часто слушаете такое ${when}`);
+  }
+  if (parts.sound > 0.45 && t.features) {
+    reasons.push(`Звучит в вашем духе: ${describeSound(t.features)}`);
+  }
   if (parts.collab > 0.15 && c.collabVia != null) {
     const via = trackById.get(c.collabVia);
     if (via) reasons.push(`Те, кому понравился «${via.title}», лайкают и это`);
@@ -367,5 +496,5 @@ function explain(c, ctx) {
   if (!c.lastHeard && c.plays < 5) reasons.push('Свежая находка: его ещё почти никто не слышал');
   if (!reasons.length && c.pop > 0.6) reasons.push('Популярно у слушателей NEYAMI');
   if (!reasons.length) reasons.push('Эксперимент — оцените, и волна станет точнее');
-  return reasons;
+  return reasons.slice(0, 3); // три главные причины — дальше читать уже никто не будет
 }

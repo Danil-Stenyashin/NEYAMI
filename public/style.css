@@ -157,3 +157,14 @@ select { background: var(--panel-2); border: 1px solid #2c2c35; border-radius: 1
 
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .row > input[type=text] { flex: 1; min-width: 140px; width: auto; }
+
+/* Звук и контекст */
+.ctx-line { margin-top: 10px; font-size: 13px; line-height: 1.7; }
+.big-sound { font-size: 20px; font-weight: 700; margin-bottom: 12px; }
+.sound-meters { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
+.sound-meters .taste-tag { grid-template-columns: 90px 1fr 44px; background: var(--panel-2); }
+.slots { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 8px; }
+.slot { padding: 14px; }
+.slot.now { outline: 1px solid var(--accent); }
+.slot-title { font-weight: 600; margin-bottom: 8px; }
+.slot-sound { font-size: 12px; margin-top: 8px; }

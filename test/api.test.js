@@ -104,3 +104,39 @@ test('без входа волна недоступна, статика защи
   const text = await res.text();
   assert.ok(!text.includes('"name": "neyami"'));
 });
+
+test('признаки звука сохраняются при загрузке, мусор отбрасывается', async () => {
+  const c = client();
+  await c('/api/register', { method: 'POST', json: { username: 'producer', password: 'password1' } });
+  const features = { bpm: 128, energy: 0.7, brightness: 0.5, dynamics: 0.4, percussive: 0.8 };
+  const ok = await c(`/api/tracks?title=Beat&features=${encodeURIComponent(JSON.stringify(features))}`, {
+    method: 'POST', body: fakeAudio, headers: { 'content-type': 'audio/ogg' },
+  });
+  assert.deepEqual(ok.data.track.features, features);
+  const junk = await c('/api/tracks?title=Junk&features=%7Bbroken', { method: 'POST', body: fakeAudio, headers: { 'content-type': 'audio/ogg' } });
+  assert.equal(junk.data.track.features, null);
+
+  const listener = client();
+  await listener('/api/register', { method: 'POST', json: { username: 'night_listener', password: 'password1' } });
+  const taste = await listener('/api/taste?tz=-180');
+  assert.equal(taste.data.profile.bySlot.length, 8);
+  await listener('/api/wave/settings', { method: 'PUT', json: { context: false } });
+  assert.equal((await listener('/api/wave/settings')).data.settings.context, 0);
+});
+
+test('старая база без новых колонок дополняется при запуске', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const { openDb } = await import('../src/db.js');
+  const file = path.join(dir, 'old.db');
+  const old = new DatabaseSync(file);
+  old.exec(`CREATE TABLE tracks (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT ',', explicit INTEGER NOT NULL DEFAULT 0,
+    file TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, duration REAL, energy_peak REAL, created_at INTEGER NOT NULL);
+    CREATE TABLE wave_settings (user_id INTEGER PRIMARY KEY, discovery REAL NOT NULL DEFAULT 0.5,
+    underground REAL NOT NULL DEFAULT 0.5, hide_explicit INTEGER NOT NULL DEFAULT 0, private_mode INTEGER NOT NULL DEFAULT 0);`);
+  old.close();
+  const db = openDb(file);
+  assert.ok(db.prepare('PRAGMA table_info(tracks)').all().some((c) => c.name === 'features'));
+  assert.ok(db.prepare('PRAGMA table_info(wave_settings)').all().some((c) => c.name === 'context'));
+  db.close();
+});

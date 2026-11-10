@@ -106,3 +106,68 @@ test('мост идёт от lofi к dnb через промежуточный �
   const mid = items.findIndex((i) => i.track.id === 6);
   assert.ok(mid > 0 && mid < items.length - 1, 'гибридный трек — в середине');
 });
+
+// ---------- звук и контекст ----------
+import { localTime, contextKernel } from '../src/recommender.js';
+
+const CALM = { bpm: 75, energy: 0.2, percussive: 0.2, brightness: 0.2, dynamics: 0.3 };
+const HARD = { bpm: 174, energy: 0.9, percussive: 0.9, brightness: 0.8, dynamics: 0.6 };
+const sonic = [
+  { id: 1, user_id: 10, artist: 'a', title: 'Calm A', tags: ['lofi'], features: CALM },
+  { id: 2, user_id: 11, artist: 'b', title: 'Hard A', tags: ['dnb'], features: HARD },
+  { id: 3, user_id: 12, artist: 'c', title: 'Без тегов, спокойный', tags: [], features: { ...CALM, bpm: 78 } },
+  { id: 4, user_id: 13, artist: 'd', title: 'Без тегов, жёсткий', tags: [], features: { ...HARD, bpm: 172 } },
+  { id: 5, user_id: 14, artist: 'e', title: 'Calm B', tags: ['lofi'], features: CALM },
+  { id: 6, user_id: 15, artist: 'f', title: 'Hard B', tags: ['dnb'], features: HARD },
+].map((t) => ({ explicit: false, created_at: NOW - 30 * DAY, ...t }));
+
+test('трек без тегов находится по звучанию', () => {
+  const { items } = recommend({
+    userId: 99, tracks: sonic, now: NOW, rng, count: 6,
+    reactions: [{ track_id: 1, value: 1, created_at: NOW - 3 * DAY }, { track_id: 5, value: 1, created_at: NOW - 3 * DAY }],
+  });
+  const ids = items.map((i) => i.track.id);
+  assert.ok(ids.indexOf(3) < ids.indexOf(4), 'спокойный без тегов выше жёсткого');
+  const calmUntagged = items.find((i) => i.track.id === 3);
+  assert.ok(calmUntagged.reasons.some((r) => r.startsWith('Звучит в вашем духе')), calmUntagged.reasons.join(' | '));
+});
+
+test('местное время и ядро контекста', () => {
+  const msk = -180; // UTC+3
+  assert.equal(localTime(Date.UTC(2026, 10, 10, 21, 0), msk).hour, 0);
+  assert.equal(localTime(Date.UTC(2026, 10, 14, 12, 0), 0).weekend, true); // суббота
+  const k = contextKernel({ hour: 23, weekend: false }, 0);
+  assert.ok(k(Date.UTC(2026, 10, 10, 1, 0)) > 0.6, 'через полночь — близко');
+  assert.ok(k(Date.UTC(2026, 10, 10, 11, 0)) < 0.01, 'полдень — далеко');
+});
+
+test('волна по контексту: ночью — спокойное, утром — энергичное', () => {
+  const at = (day, hour) => Date.UTC(2026, 10, day, hour, 0); // будни, UTC
+  const events = [];
+  for (let d = 2; d <= 6; d++) {
+    events.push({ track_id: 1, type: 'complete', created_at: at(d, 23) }); // ночью lofi
+    events.push({ track_id: 2, type: 'complete', created_at: at(d, 8) });  // утром dnb
+  }
+  const base = { userId: 99, tracks: sonic, events, rng, count: 6, tzOffset: 0 };
+  const night = recommend({ ...base, now: at(10, 23) });
+  const morning = recommend({ ...base, now: at(10, 8) });
+  const rank = (r, id) => r.items.findIndex((i) => i.track.id === id);
+  assert.ok(rank(night, 5) < rank(night, 6), 'ночью lofi выше dnb');
+  assert.ok(rank(morning, 6) < rank(morning, 5), 'утром dnb выше lofi');
+  assert.ok(night.items.some((i) => i.reasons.some((r) => r.includes('ночью'))));
+  assert.equal(night.profile.context.slot, 'ночью');
+  // без контекста порядок одинаковый в любое время
+  const off = (now) => recommend({ ...base, now, settings: { context: 0 } }).items.map((i) => i.track.id).join();
+  assert.equal(off(at(10, 23)), off(at(10, 8)));
+});
+
+test('мост по звуку проходит через трек без тегов', () => {
+  const mid = { id: 7, user_id: 16, artist: 'g', title: 'Середина', tags: [], explicit: false, created_at: NOW - 30 * DAY,
+    features: { bpm: 115, energy: 0.55, percussive: 0.55, brightness: 0.5, dynamics: 0.45 } };
+  const { items, path } = bridge({ userId: 99, tracks: [...sonic, mid], now: NOW, rng, from: 'lofi', to: 'dnb', length: 5 });
+  assert.ok(path.from.includes('BPM') && path.to.includes('BPM'));
+  const ids = items.map((i) => i.track.id);
+  assert.ok([1, 5].includes(ids[0]) && [2, 6].includes(ids.at(-1)), ids.join());
+  const energy = items.map((i) => i.track.features.energy);
+  assert.ok(energy[0] < energy.at(-1), 'энергия растёт по пути');
+});

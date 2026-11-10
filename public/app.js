@@ -1,4 +1,8 @@
 // NEYAMI — клиент. Без фреймворков: hash-роутинг, один <audio>, состояние в модуле.
+import { extractFeatures } from './audio-features.js';
+
+// Часовой пояс — для «волны по контексту» (утро/вечер/выходные считаются по местному времени)
+const TZ = new Date().getTimezoneOffset();
 
 const $ = (sel, el = document) => el.querySelector(sel);
 const view = $('#view');
@@ -181,7 +185,7 @@ async function refillWave(append = false) {
   if (state.cur) state.seen.add(state.cur.track.id);
   try {
     const exclude = [...state.seen, ...state.queue.map((i) => i.track.id)].slice(-300).join(',');
-    const data = await api(`/api/wave?count=10&exclude=${exclude}`);
+    const data = await api(`/api/wave?count=10&tz=${TZ}&exclude=${exclude}`);
     for (const it of data.items) state.seen.add(it.track.id);
     state.queue = append ? state.queue.concat(data.items) : data.items;
     if (data.items.length === 0 && state.seen.size) {
@@ -310,6 +314,7 @@ function trackRow(item, idx) {
       <div class="sub">
         <a href="#/u/${encodeURIComponent(t.artist.username)}">${esc(t.artist.username)}</a>
         <span>${fmt(t.duration)}</span>
+        ${t.features?.bpm ? `<span title="Темп, определён анализом звука">${t.features.bpm} BPM</span>` : ''}
         <span>♥ ${t.likes}</span><span>▶ ${t.plays}</span>
         ${t.tags.map((g) => `<a class="chip tag" href="#/tag/${encodeURIComponent(g)}">#${esc(g)}</a>`).join('')}
       </div>
@@ -443,8 +448,12 @@ async function renderWave() {
           <label title="Прослушивания не будут влиять на волну — удобно, если включает гость или ребёнок">
             <input type="checkbox" id="private-mode" ${s.private_mode ? 'checked' : ''}> 🕶 Не запоминать
           </label>
+          <label title="Утром, ночью и в выходные вкус разный — волна учитывает время">
+            <input type="checkbox" id="context-mode" ${s.context !== 0 ? 'checked' : ''}> 🕐 Учитывать время
+          </label>
           <a href="#/quick"><button>⚡ Быстрый поиск</button></a>
         </div>
+        <div id="context-line" class="muted ctx-line"></div>
         <div style="margin-top:12px"><span class="muted">Ваш вкус: </span><span id="profile-chips" class="chips"></span>
           <a href="#/taste" class="muted"> — настроить</a></div>
       </div>
@@ -483,10 +492,14 @@ async function renderWave() {
     save({ private_mode: e.target.checked });
     toast(e.target.checked ? 'Режим «не запоминать» включён 🕶' : 'Волна снова учится на ваших прослушиваниях');
   };
+  $('#context-mode').onchange = (e) => {
+    save({ context: e.target.checked });
+    toast(e.target.checked ? 'Волна учитывает время суток 🕐' : 'Время суток больше не учитывается');
+  };
   $('#b-go').onclick = startBridge;
   renderQueue();
   if (!state.profile) {
-    api('/api/wave?count=1').then((d) => { state.profile = d.profile; renderProfileChips(); }).catch(() => {});
+    api(`/api/wave?count=1&tz=${TZ}`).then((d) => { state.profile = d.profile; renderProfileChips(); }).catch(() => {});
   } else renderProfileChips();
 }
 
@@ -497,6 +510,18 @@ function renderProfileChips() {
   el.innerHTML = p.topTags.length
     ? p.topTags.slice(0, 6).map(([t]) => `<span class="chip pos">#${esc(t)}</span>`).join('')
     : '<span class="muted">пока не знаю — включите волну и оценивайте треки</span>';
+  const line = $('#context-line');
+  if (!line) return;
+  const c = p.context;
+  const lines = [];
+  if (p.sound) lines.push(`🔊 Ваш звук: ${esc(p.sound.text)}`);
+  if (state.settings?.context !== 0 && c) {
+    const when = `${c.slot}${c.weekend ? ' в выходные' : ' в будни'}`;
+    lines.push(c.confidence >= 0.3 && c.topTags.length
+      ? `🕐 Сейчас — как обычно ${when}: ${c.topTags.slice(0, 3).map(([t]) => '#' + esc(t)).join(' ')}${c.sound ? ` · ${esc(c.sound)}` : ''}`
+      : `🕐 Пока мало слушали ${when} — волна подстроится под это время`);
+  }
+  line.innerHTML = lines.join('<br>');
 }
 
 function renderQueue() {
@@ -517,8 +542,9 @@ async function startBridge() {
   const length = Number($('#b-len').value);
   if (!from || !to) return toast('Укажите оба тега');
   try {
-    const data = await api(`/api/wave/bridge?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&length=${length}`);
+    const data = await api(`/api/wave/bridge?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&length=${length}&tz=${TZ}`);
     if (!data.items.length) return toast('Не нашёл треков с такими тегами');
+    if (data.path) toast(`Звук: ${data.path.from} → ${data.path.to}`);
     state.bridge = { from, to, length };
     state.mode = 'bridge';
     state.queue = data.items;
@@ -569,7 +595,7 @@ async function previewNext(outcome) {
   preview.item = null;
   if (!preview.items.length) {
     const exclude = [...state.seen].slice(-300).join(',');
-    const data = await api(`/api/wave?count=10&exclude=${exclude}`).catch((e) => (toast(e.message), { items: [] }));
+    const data = await api(`/api/wave?count=10&tz=${TZ}&exclude=${exclude}`).catch((e) => (toast(e.message), { items: [] }));
     data.items.forEach((i) => state.seen.add(i.track.id));
     preview.items = data.items;
   }
@@ -640,7 +666,7 @@ function previewKeys(e) {
 // ---------- Мой вкус ----------
 async function renderTaste() {
   if (!requireLogin()) return;
-  const { profile, overrides, settings } = await api('/api/taste');
+  const { profile, overrides, settings } = await api(`/api/taste?tz=${TZ}`);
   const actLabel = { forget: 'забыт', boost: 'больше', block: 'скрыт' };
   const pct = Math.round(profile.confidence * 100);
   view.innerHTML = `
@@ -653,6 +679,28 @@ async function renderTaste() {
         <label><input type="checkbox" id="t-private" ${settings.private_mode ? 'checked' : ''}> 🕶 Не запоминать прослушивания</label>
       </div>
       <div class="progress" style="margin-top:8px"><div style="width:${pct}%"></div></div>
+    </div>
+
+    ${profile.sound ? `<h2>Ваш звук</h2>
+    <div class="card sound-card">
+      <div class="big-sound">${esc(profile.sound.text)}</div>
+      <div class="sound-meters">
+        ${[['energy', 'Энергия'], ['percussive', 'Ударность'], ['brightness', 'Яркость'], ['dynamics', 'Динамика']].map(([k, label]) => `
+          <div class="taste-tag"><span>${label}</span><div class="meter"><div class="pos" style="width:${Math.round(profile.sound[k] * 100)}%"></div></div><span class="muted">${Math.round(profile.sound[k] * 100)}%</span></div>`).join('')}
+      </div>
+      <p class="muted" style="margin-bottom:0">Волна сравнивает треки по звучанию, поэтому находит похожее даже без тегов.</p>
+    </div>` : ''}
+
+    <h2>Вкус по времени суток ${settings.context === 0 ? '<span class="muted">(выключено на странице волны)</span>' : ''}</h2>
+    <div class="slots">
+      ${profile.bySlot.map((sl) => `
+        <div class="slot card ${sl.hour === Math.floor(localHourNow() / 6) * 6 + 3 && sl.weekend === isWeekendNow() ? 'now' : ''}">
+          <div class="slot-title">${{ 3: '🌙 Ночь', 9: '🌅 Утро', 15: '☀️ День', 21: '🌆 Вечер' }[sl.hour]} <span class="muted">· ${sl.weekend ? 'выходные' : 'будни'}</span></div>
+          ${sl.confidence < 0.2 || !sl.topTags.length
+            ? '<div class="muted">мало данных</div>'
+            : `<div class="chips">${sl.topTags.map(([t]) => `<span class="chip pos">#${esc(t)}</span>`).join('')}</div>
+               ${sl.sound ? `<div class="muted slot-sound">${esc(sl.sound)}</div>` : ''}`}
+        </div>`).join('')}
     </div>
 
     <h2>Что вам нравится</h2>
@@ -714,6 +762,9 @@ async function renderTaste() {
   };
 }
 
+const localHourNow = () => new Date().getHours();
+const isWeekendNow = () => [0, 6].includes(new Date().getDay());
+
 function tasteTag(tag, v) {
   return `
     <div class="taste-tag">
@@ -761,6 +812,7 @@ async function analyzeAudio(file) {
     for (let j = i; j < i + hop; j += 4) s += data[j] * data[j];
     rms.push(Math.sqrt(s / (hop / 4)));
   }
+  const features = extractFeatures(data, buf.sampleRate);
   const W = 12; // 6 секунд
   let best = 0;
   let bestScore = -Infinity;
@@ -771,7 +823,7 @@ async function analyzeAudio(file) {
     const score = after + Math.max(0, after - before) * 1.5;
     if (score > bestScore) [bestScore, best] = [score, i];
   }
-  return { duration: buf.duration, peak: rms.length > 2 * W ? best / 2 : null };
+  return { duration: buf.duration, peak: rms.length > 2 * W ? best / 2 : null, features };
 }
 
 function renderUpload() {
@@ -799,7 +851,7 @@ function renderUpload() {
     const file = form.file.files[0];
     if (!file) return;
     const status = $('#up-status');
-    status.textContent = 'Анализирую звук, ищу дроп…';
+    status.textContent = 'Анализирую звук: темп, энергия, дроп…';
     let info = { duration: null, peak: null };
     try { info = await analyzeAudio(file); } catch { /* браузер не смог декодировать — не страшно */ }
     const params = new URLSearchParams({
@@ -808,6 +860,7 @@ function renderUpload() {
     });
     if (info.duration) params.set('duration', info.duration.toFixed(2));
     if (info.peak != null) params.set('peak', info.peak.toFixed(1));
+    if (info.features) params.set('features', JSON.stringify(info.features));
     status.textContent = 'Загрузка…';
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `/api/tracks?${params}`);

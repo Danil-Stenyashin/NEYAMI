@@ -5,7 +5,8 @@ import crypto from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { openDb, parseTags, encodeTags, decodeTags } from './db.js';
 import { hashPassword, verifyPassword, newToken, parseCookies } from './auth.js';
-import { recommend, bridge, buildContext, describeProfile } from './recommender.js';
+import { recommend, bridge, buildContext, describeProfile, buildContextSignals, buildProfiles, applyTagOverrides, buildSoundProfile } from './recommender.js';
+import { sanitizeFeatures, describeSound } from './sound.js';
 import { BINS, bestMoment, segmentsToBins, seekBin } from './moments.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -83,7 +84,7 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
   };
 
   const TRACK_SELECT = `
-    SELECT t.id, t.user_id, t.title, t.description, t.tags, t.explicit, t.duration, t.energy_peak, t.created_at,
+    SELECT t.id, t.user_id, t.title, t.description, t.tags, t.explicit, t.duration, t.energy_peak, t.features, t.created_at,
            u.username AS artist,
            (SELECT COUNT(*) FROM reactions r WHERE r.track_id = t.id AND r.value = 1) AS likes,
            (SELECT COUNT(*) FROM events e WHERE e.track_id = t.id AND e.type = 'play') AS plays,
@@ -103,6 +104,7 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
     explicit: Boolean(r.explicit), duration: r.duration, created_at: r.created_at,
     artist: { id: r.user_id, username: r.artist },
     likes: r.likes, plays: r.plays, my_reaction: r.my_reaction,
+    features: sanitizeFeatures(r.features),
   });
 
   const getTrack = (id, viewerId = 0) => {
@@ -205,12 +207,13 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
 
     const duration = Number(url.searchParams.get('duration'));
     const peak = Number(url.searchParams.get('peak'));
-    const { lastInsertRowid } = q(`INSERT INTO tracks (user_id, title, description, tags, explicit, file, mime, size, duration, energy_peak, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    const features = sanitizeFeatures(url.searchParams.get('features'));
+    const { lastInsertRowid } = q(`INSERT INTO tracks (user_id, title, description, tags, explicit, file, mime, size, duration, energy_peak, features, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       me.id, title, String(url.searchParams.get('description') ?? '').slice(0, 5000),
       encodeTags(parseTags(url.searchParams.get('tags'))), url.searchParams.get('explicit') === '1' ? 1 : 0,
       fileName, mime, size, Number.isFinite(duration) && duration > 0 ? duration : null,
-      Number.isFinite(peak) && peak >= 0 ? peak : null, Date.now(),
+      Number.isFinite(peak) && peak >= 0 ? peak : null, features ? JSON.stringify(features) : null, Date.now(),
     );
     send(res, 201, { track: toTrack(getTrack(Number(lastInsertRowid), me.id)) });
   });
@@ -314,8 +317,8 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
 
   // ---------- Волна ----------
   const getSettings = (userId) =>
-    q('SELECT discovery, underground, hide_explicit, private_mode FROM wave_settings WHERE user_id = ?').get(userId)
-    ?? { discovery: 0.5, underground: 0.5, hide_explicit: 0, private_mode: 0 };
+    q('SELECT discovery, underground, hide_explicit, private_mode, context FROM wave_settings WHERE user_id = ?').get(userId)
+    ?? { discovery: 0.5, underground: 0.5, hide_explicit: 0, private_mode: 0, context: 1 };
 
   route('GET', '/api/wave/settings', async (req, res) => send(res, 200, { settings: getSettings(requireUser(req).id) }));
 
@@ -329,20 +332,26 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
       underground: unit(body.underground, cur.underground),
       hide_explicit: body.hide_explicit === undefined ? cur.hide_explicit : (body.hide_explicit ? 1 : 0),
       private_mode: body.private_mode === undefined ? cur.private_mode : (body.private_mode ? 1 : 0),
+      context: body.context === undefined ? cur.context : (body.context ? 1 : 0),
     };
-    q(`INSERT INTO wave_settings (user_id, discovery, underground, hide_explicit, private_mode) VALUES (?, ?, ?, ?, ?)
+    q(`INSERT INTO wave_settings (user_id, discovery, underground, hide_explicit, private_mode, context) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT (user_id) DO UPDATE SET discovery = excluded.discovery, underground = excluded.underground,
-       hide_explicit = excluded.hide_explicit, private_mode = excluded.private_mode`)
-      .run(me.id, next.discovery, next.underground, next.hide_explicit, next.private_mode);
+       hide_explicit = excluded.hide_explicit, private_mode = excluded.private_mode, context = excluded.context`)
+      .run(me.id, next.discovery, next.underground, next.hide_explicit, next.private_mode, next.context);
     send(res, 200, { settings: next });
   });
 
   // MVP: считаем на лету. При росте каталога — предрасчёт co-likes и кандидатов в фоне (см. README).
+  // Смещение часового пояса клиента (как Date#getTimezoneOffset), нужно для «волны по контексту»
+  const parseTz = (url) => {
+    const tz = Number(url?.searchParams.get('tz'));
+    return Number.isFinite(tz) && Math.abs(tz) <= 14 * 60 ? tz : 0;
+  };
   const loadRecoInputs = (me, url) => {
     const since = Date.now() - 180 * 24 * 3600 * 1000;
-    const tracks = q(`SELECT t.id, t.user_id, t.title, t.tags, t.explicit, t.created_at, u.username AS artist
+    const tracks = q(`SELECT t.id, t.user_id, t.title, t.tags, t.explicit, t.features, t.created_at, u.username AS artist
                       FROM tracks t JOIN users u ON u.id = t.user_id`).all()
-      .map((r) => ({ ...r, tags: decodeTags(r.tags), explicit: Boolean(r.explicit) }));
+      .map((r) => ({ ...r, tags: decodeTags(r.tags), explicit: Boolean(r.explicit), features: sanitizeFeatures(r.features) }));
     const stats = new Map();
     for (const r of q(`SELECT track_id, SUM(type = 'play') AS plays, SUM(type = 'complete') AS completes,
                        SUM(type = 'skip') AS skips FROM events GROUP BY track_id`).all()) {
@@ -365,6 +374,7 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
       settings: getSettings(me.id),
       tagOverrides: new Map(q('SELECT tag, action FROM taste_tags WHERE user_id = ?').all(me.id).map((r) => [r.tag, r.action])),
       exclude: new Set(String(url?.searchParams.get('exclude') ?? '').split(',').map(Number).filter(Boolean)),
+      tzOffset: parseTz(url),
     };
   };
   const hydrate = (me, result) => ({
@@ -426,12 +436,27 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
   });
 
   // ---------- Прозрачный вкус ----------
-  route('GET', '/api/taste', async (req, res) => {
+  route('GET', '/api/taste', async (req, res, _p, url) => {
     const me = requireUser(req);
-    const inputs = loadRecoInputs(me, null);
+    const inputs = loadRecoInputs(me, url);
     const ctx = buildContext(inputs);
     const profile = describeProfile(ctx);
     profile.influences = profile.influences.map((i) => ({ ...i, track: toTrack(getTrack(i.track_id, me.id)) }));
+    // Вкус по времени суток: середины слотов «ночь / утро / день / вечер», будни и выходные
+    const now = Date.now();
+    profile.bySlot = [];
+    for (const weekend of [false, true]) {
+      for (const hour of [3, 9, 15, 21]) {
+        const cs = buildContextSignals({ events: inputs.events, reactions: inputs.reactions, now, target: { hour, weekend }, tzOffset: inputs.tzOffset });
+        const tags = applyTagOverrides(buildProfiles(cs.signal, ctx.trackById).tags, inputs.tagOverrides);
+        const sound = buildSoundProfile(cs.signal, ctx.trackById).like;
+        profile.bySlot.push({
+          hour, weekend, confidence: Math.round(cs.confidence * 100) / 100,
+          topTags: [...tags].filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).slice(0, 4),
+          sound: sound ? describeSound(sound) : null,
+        });
+      }
+    }
     send(res, 200, {
       profile,
       overrides: [...inputs.tagOverrides].map(([tag, action]) => ({ tag, action })),

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { openDb, encodeTags } from '../src/db.js';
 import { hashPassword } from '../src/auth.js';
 import { BINS } from '../src/moments.js';
+import { extractFeatures } from '../public/audio-features.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const dataDir = process.env.DATA_DIR ?? path.join(ROOT, 'data');
@@ -57,7 +58,7 @@ function synth({ bpm, root, wave, dropAt, noise }) {
   header.write('fmt ', 12); header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20); header.writeUInt16LE(1, 22);
   header.writeUInt32LE(SR, 24); header.writeUInt32LE(SR * 2, 28); header.writeUInt16LE(2, 32); header.writeUInt16LE(16, 34);
   header.write('data', 36); header.writeUInt32LE(n * 2, 40);
-  return Buffer.concat([header, Buffer.from(pcm.buffer)]);
+  return { wav: Buffer.concat([header, Buffer.from(pcm.buffer)]), samples: Float32Array.from(pcm, (v) => v / 32768) };
 }
 
 const ARTISTS = [
@@ -73,28 +74,32 @@ const ARTISTS = [
     titles: [['Без фильтров', ['explicit']], ['Район', []], ['Голос улиц', ['explicit']], ['Бит без слов', ['instrumental']]] },
   { name: 'ambient_whale', style: { bpm: 60, root: 147, wave: 'sine', noise: 0.02 }, tags: ['ambient', 'sleep'],
     titles: [['Глубина', ['chill']], ['Тихий океан', []], ['Медленные облака', ['study']]] },
+  // Артист, который не ставит теги: его треки волна найдёт только по звучанию
+  { name: 'no_tags_kid', style: { bpm: 172, root: 120, wave: 'saw', noise: 0.3 }, tags: [],
+    titles: [['Без названия 1', []], ['Без названия 2', []]] },
 ];
 
 const pass = hashPassword('demo1234');
 const now = Date.now();
 const insUser = db.prepare('INSERT INTO users (username, pass_hash, bio, created_at) VALUES (?, ?, ?, ?)');
-const insTrack = db.prepare(`INSERT INTO tracks (user_id, title, description, tags, explicit, file, mime, size, duration, energy_peak, created_at)
-  VALUES (?, ?, ?, ?, ?, ?, 'audio/wav', ?, ?, ?, ?)`);
+const insTrack = db.prepare(`INSERT INTO tracks (user_id, title, description, tags, explicit, file, mime, size, duration, energy_peak, features, created_at)
+  VALUES (?, ?, ?, ?, ?, ?, 'audio/wav', ?, ?, ?, ?, ?)`);
 
 const tracks = [];
 for (const a of ARTISTS) {
   const uid = Number(insUser.run(a.name, pass, `Демо-артист: ${a.tags.map((t) => '#' + t).join(' ')}`, now).lastInsertRowid);
   a.titles.forEach(([title, extra], k) => {
     const dropAt = 6 + Math.floor(rand() * 10);
-    const buf = synth({ ...a.style, root: a.style.root * (1 + k * 0.12), dropAt });
+    const { wav: buf, samples } = synth({ ...a.style, root: a.style.root * (1 + k * 0.12), dropAt });
+    const features = extractFeatures(samples, SR);
     const file = `${crypto.randomBytes(16).toString('hex')}.wav`;
     fs.writeFileSync(path.join(uploads, file), buf);
     const tags = [...new Set([...a.tags, ...extra])];
     const explicit = tags.includes('explicit') ? 1 : 0;
     const age = Math.floor(rand() * 40) * 24 * 3600 * 1000;
     const id = Number(insTrack.run(uid, title, 'Синтезированный демо-трек.', encodeTags(tags.filter((t) => t !== 'explicit')),
-      explicit, file, buf.length, DUR, dropAt, now - age).lastInsertRowid);
-    tracks.push({ id, tags, dropAt, artist: a.name });
+      explicit, file, buf.length, DUR, dropAt, JSON.stringify(features), now - age).lastInsertRowid);
+    tracks.push({ id, tags, dropAt, artist: a.name, features });
   });
 }
 
@@ -113,13 +118,24 @@ const insReact = db.prepare('INSERT INTO reactions (user_id, track_id, value, cr
 const insEvent = db.prepare('INSERT INTO events (user_id, track_id, type, position, duration, created_at) VALUES (?, ?, ?, ?, ?, ?)');
 const heat = new Map(tracks.map((t) => [t.id, { heard: new Array(BINS).fill(0), seeks: new Array(BINS).fill(0) }]));
 
+// Привычки по времени: спокойное — ночью, энергичное — утром и вечером, остальное — днём
+const DAY_MS = 24 * 3600 * 1000;
+function listenTime(t) {
+  const calm = ['night', 'sleep', 'ambient', 'lofi'].some((g) => t.tags.includes(g));
+  const pumped = ['workout', 'energy', 'jungle'].some((g) => t.tags.includes(g)) || (t.features?.energy ?? 0) > 0.6;
+  const hour = calm ? (22 + Math.floor(rand() * 5)) % 24 : pumped ? (rand() < 0.5 ? 7 : 18) + Math.floor(rand() * 3) : 11 + Math.floor(rand() * 6);
+  const midnight = new Date(now - Math.floor(1 + rand() * 20) * DAY_MS);
+  midnight.setHours(0, 0, 0, 0); // местное время машины, на которой запущен сид
+  return midnight.getTime() + hour * 3600 * 1000 + Math.floor(rand() * 3600 * 1000);
+}
+
 for (const [name, likes] of LISTENERS) {
   const uid = Number(insUser.run(name, pass, '', now).lastInsertRowid);
   for (const t of tracks) {
     const match = t.tags.filter((g) => likes.includes(g)).length;
     const p = match ? 0.45 + 0.2 * match : 0.12;
     if (rand() > p) continue;
-    const ts = now - Math.floor(rand() * 20) * 24 * 3600 * 1000;
+    const ts = listenTime(t);
     insEvent.run(uid, t.id, 'play', 0, DUR, ts);
     const h = heat.get(t.id);
     if (match) {

@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS tracks (
   size        INTEGER NOT NULL,
   duration    REAL,
   energy_peak REAL,             -- секунда энергетического пика (анализ звука при загрузке)
+  features    TEXT,             -- JSON: bpm, energy, brightness, dynamics, percussive
   created_at  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS tracks_user ON tracks(user_id);
@@ -81,7 +82,8 @@ CREATE TABLE IF NOT EXISTS wave_settings (
   discovery     REAL NOT NULL DEFAULT 0.5,
   underground   REAL NOT NULL DEFAULT 0.5,
   hide_explicit INTEGER NOT NULL DEFAULT 0,
-  private_mode  INTEGER NOT NULL DEFAULT 0   -- «не запоминать»: прослушивания не влияют на вкус
+  private_mode  INTEGER NOT NULL DEFAULT 0,  -- «не запоминать»: прослушивания не влияют на вкус
+  context       INTEGER NOT NULL DEFAULT 1   -- учитывать время суток и выходные
 );
 
 -- Тепловая карта прослушиваний: трек делится на 100 бинов.
@@ -104,9 +106,19 @@ CREATE TABLE IF NOT EXISTS taste_tags (
 );
 `;
 
+// Колонки, добавленные после первой версии: досоздаём их в уже существующих базах
+const MIGRATIONS = [
+  ['tracks', 'features', 'TEXT'],
+  ['wave_settings', 'context', 'INTEGER NOT NULL DEFAULT 1'],
+];
+
 export function openDb(file) {
   const db = new DatabaseSync(file);
   db.exec(SCHEMA);
+  for (const [table, column, type] of MIGRATIONS) {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+    if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  }
   return db;
 }
 
