@@ -1,0 +1,3 @@
+# Windows-скрипты должны иметь переводы строк CRLF
+*.cmd text eol=crlf
+*.sh  text eol=lf

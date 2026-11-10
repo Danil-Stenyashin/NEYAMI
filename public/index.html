@@ -2,9 +2,19 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>NEYAMI</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%23ff5a36'/></svg>">
+  <meta name="description" content="Свободная музыка и волна, которая слышит звук и объясняет каждую рекомендацию">
+  <meta name="theme-color" content="#0e0e11">
+  <!-- iPhone: запуск с экрана «Домой» как отдельное приложение -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="NEYAMI">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/svg+xml" href="/icons/icon.svg">
+  <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -22,6 +32,9 @@
     <div id="account" class="account"></div>
   </header>
 
+  <div id="offline" class="offline hidden">
+    Нет связи с сервером NEYAMI. Проверьте, что он запущен на компьютере и телефон в той же Wi-Fi сети. Переподключаюсь…
+  </div>
   <main id="view"></main>
 
   <footer id="player" class="player hidden">

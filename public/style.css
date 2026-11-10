@@ -58,7 +58,7 @@ h2 { font-size: 18px; margin: 28px 0 12px; }
   box-shadow: 0 0 60px rgba(255,90,54,.35);
 }
 .wave-btn.playing { animation: pulse 2.4s ease-in-out infinite; }
-@keyframes pulse { 50% { box-shadow: 0 0 100px rgba(255,90,54,.6); transform: scale(1.03); } }
+@keyframes pulse { 50% { box-shadow: 0 0 90px 10px rgba(255,90,54,.6); } }
 .slider { margin: 14px 0; }
 .slider .labels { display: flex; justify-content: space-between; color: var(--muted); font-size: 13px; }
 .slider input { width: 100%; accent-color: var(--accent); }
@@ -168,3 +168,44 @@ select { background: var(--panel-2); border: 1px solid #2c2c35; border-radius: 1
 .slot.now { outline: 1px solid var(--accent); }
 .slot-title { font-weight: 600; margin-bottom: 8px; }
 .slot-sound { font-size: 12px; margin-top: 8px; }
+
+/* ---------- iPhone и установленное приложение ---------- */
+.top { padding-top: max(12px, env(safe-area-inset-top)); padding-left: max(24px, env(safe-area-inset-left)); padding-right: max(24px, env(safe-area-inset-right)); }
+.player { padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+body { padding-bottom: calc(150px + env(safe-area-inset-bottom)); -webkit-tap-highlight-color: transparent; }
+button, a, input[type=range] { touch-action: manipulation; } /* без задержки и зума по двойному тапу */
+.touch-only { display: none; }
+@media (hover: none) and (pointer: coarse) {
+  .touch-only { display: block; }
+  .keys:not(.touch-only) { display: none; }
+}
+
+@media (max-width: 760px) {
+  /* iOS увеличивает страницу при фокусе на поле с шрифтом меньше 16px */
+  input[type=text], input[type=password], input[type=search], textarea, select { font-size: 16px; }
+  .top { padding-left: max(14px, env(safe-area-inset-left)); padding-right: max(14px, env(safe-area-inset-right)); }
+  nav { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; width: 100%; order: 4; padding-bottom: 2px; }
+  nav::-webkit-scrollbar { display: none; }
+  nav a { white-space: nowrap; }
+  .account { margin-left: auto; }
+  .wave-btn { width: 170px; height: 170px; font-size: 19px; }
+  h1 { font-size: 24px; }
+  .player { gap: 4px 12px; padding-left: 14px; padding-right: 14px; }
+  .p-controls { gap: 6px; }
+  .p-controls button { padding: 8px 10px; }
+  .p-controls .big { width: 44px; height: 44px; padding: 0; }
+  .p-reasons { font-size: 11px; max-height: 2.6em; overflow: hidden; }
+  .quick { padding: 26px 16px; }
+  .q-title { font-size: 22px; }
+  .q-actions button { flex: 1; padding: 14px 8px; }
+  .taste-tag { grid-template-columns: 90px 1fr auto; }
+  .bridge .row > span { display: none; }
+}
+/* В установленном приложении нет адресной строки — даём немного воздуха сверху */
+@media (display-mode: standalone) {
+  .top { background: rgba(14,14,17,.97); }
+}
+
+.offline { max-width: 980px; margin: 14px auto 0; padding: 12px 16px; border-radius: 12px;
+  background: #3a1d17; border: 1px solid #6b2a1e; color: #ffd2c4; font-size: 14px; }
+@media (max-width: 760px) { .offline { margin: 10px 14px 0; } }

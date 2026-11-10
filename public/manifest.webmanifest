@@ -1,0 +1,24 @@
+{
+  "name": "NEYAMI",
+  "short_name": "NEYAMI",
+  "description": "Свободная музыка и волна, которая слышит звук, знает время суток и объясняет каждую рекомендацию.",
+  "lang": "ru",
+  "id": "/",
+  "start_url": "/#/wave",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0e0e11",
+  "theme_color": "#0e0e11",
+  "categories": ["music", "entertainment"],
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ],
+  "shortcuts": [
+    { "name": "Моя волна", "url": "/#/wave", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Быстрый поиск", "url": "/#/quick", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Мой вкус", "url": "/#/taste", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] }
+  ]
+}

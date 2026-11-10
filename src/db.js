@@ -104,6 +104,15 @@ CREATE TABLE IF NOT EXISTS taste_tags (
   created_at  INTEGER NOT NULL,
   PRIMARY KEY (user_id, tag)
 );
+
+-- «Забытые» треки: история по ним стёрта, а оценки до этого момента не влияют на вкус
+-- (лайк при этом остаётся в «Мне нравится»)
+CREATE TABLE IF NOT EXISTS taste_forgotten (
+  user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  track_id    INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+  created_at  INTEGER NOT NULL,
+  PRIMARY KEY (user_id, track_id)
+);
 `;
 
 // Колонки, добавленные после первой версии: досоздаём их в уже существующих базах

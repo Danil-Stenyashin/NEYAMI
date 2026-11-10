@@ -2,7 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { openDb, parseTags, encodeTags, decodeTags } from './db.js';
 import { hashPassword, verifyPassword, newToken, parseCookies } from './auth.js';
 import { recommend, bridge, buildContext, describeProfile, buildContextSignals, buildProfiles, applyTagOverrides, buildSoundProfile } from './recommender.js';
@@ -23,6 +23,7 @@ const AUDIO_TYPES = {
 const STATIC_TYPES = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
+  '.png': 'image/png', '.webmanifest': 'application/manifest+json; charset=utf-8', '.json': 'application/json; charset=utf-8',
 };
 const TASTE_ACTIONS = new Set(['forget', 'boost', 'block']);
 const EVENT_TYPES = new Set(['play', 'complete', 'skip', 'preview_complete', 'preview_skip']);
@@ -75,11 +76,14 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
     return u;
   };
 
-  const startSession = (res, userId, user) => {
+  // За HTTPS-прокси или туннелем (например, для iPhone вне дома) cookie помечается Secure
+  const isHttps = (req) => req.socket.encrypted || String(req.headers['x-forwarded-proto'] ?? '').startsWith('https');
+
+  const startSession = (req, res, userId, user) => {
     const token = newToken();
     q('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)').run(token, userId, Date.now());
     send(res, 200, { user }, {
-      'Set-Cookie': `sid=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_TTL / 1000}`,
+      'Set-Cookie': `sid=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_TTL / 1000}${isHttps(req) ? '; Secure' : ''}`,
     });
   };
 
@@ -129,14 +133,14 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
     if (q('SELECT 1 FROM users WHERE username = ?').get(name)) throw new HttpError(409, 'Имя уже занято');
     const { lastInsertRowid } = q('INSERT INTO users (username, pass_hash, created_at) VALUES (?, ?, ?)')
       .run(name, hashPassword(String(password)), Date.now());
-    startSession(res, Number(lastInsertRowid), { id: Number(lastInsertRowid), username: name });
+    startSession(req, res, Number(lastInsertRowid), { id: Number(lastInsertRowid), username: name });
   });
 
   route('POST', '/api/login', async (req, res) => {
     const { username, password } = await readJson(req);
     const row = q('SELECT id, username, pass_hash FROM users WHERE username = ?').get(String(username ?? ''));
     if (!row || !verifyPassword(String(password ?? ''), row.pass_hash)) throw new HttpError(401, 'Неверное имя или пароль');
-    startSession(res, row.id, { id: row.id, username: row.username });
+    startSession(req, res, row.id, { id: row.id, username: row.username });
   });
 
   route('POST', '/api/logout', async (req, res) => {
@@ -257,6 +261,8 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
     const id = Number(p.id);
     getTrack(id);
     const value = Math.sign(Number((await readJson(req)).value) || 0);
+    // новая оценка — новое мнение: отметка «забыт» снимается
+    q('DELETE FROM taste_forgotten WHERE user_id = ? AND track_id = ?').run(me.id, id);
     if (value === 0) q('DELETE FROM reactions WHERE user_id = ? AND track_id = ?').run(me.id, id);
     else q(`INSERT INTO reactions (user_id, track_id, value, created_at) VALUES (?, ?, ?, ?)
             ON CONFLICT (user_id, track_id) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`)
@@ -367,7 +373,10 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
       userId: me.id,
       tracks,
       events: q('SELECT track_id, type, position, duration, created_at FROM events WHERE user_id = ? AND created_at > ?').all(me.id, since),
-      reactions: q('SELECT track_id, value, created_at FROM reactions WHERE user_id = ?').all(me.id),
+      // оценки «забытых» треков не учитываются, пока человек не оценит трек заново
+      reactions: q(`SELECT r.track_id, r.value, r.created_at FROM reactions r
+                    LEFT JOIN taste_forgotten f ON f.user_id = r.user_id AND f.track_id = r.track_id
+                    WHERE r.user_id = ? AND (f.created_at IS NULL OR r.created_at > f.created_at)`).all(me.id),
       allLikes,
       stats,
       follows: new Set(q('SELECT artist_id FROM follows WHERE follower_id = ?').all(me.id).map((r) => r.artist_id)),
@@ -477,23 +486,33 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
     send(res, 200, { ok: true });
   });
 
-  // «Забыть трек»: убирает его из истории и оценок — волна перестаёт на него опираться
+  // «Забыть трек»: волна перестаёт на него опираться. История прослушиваний стирается,
+  // а лайк остаётся в «Мне нравится» — коллекцию человек не теряет.
   route('DELETE', '/api/taste/tracks/:id', async (req, res, p) => {
     const me = requireUser(req);
-    q('DELETE FROM events WHERE user_id = ? AND track_id = ?').run(me.id, Number(p.id));
-    q('DELETE FROM reactions WHERE user_id = ? AND track_id = ?').run(me.id, Number(p.id));
+    const id = Number(p.id);
+    getTrack(id);
+    q('DELETE FROM events WHERE user_id = ? AND track_id = ?').run(me.id, id);
+    q(`INSERT INTO taste_forgotten (user_id, track_id, created_at) VALUES (?, ?, ?)
+       ON CONFLICT (user_id, track_id) DO UPDATE SET created_at = excluded.created_at`).run(me.id, id, Date.now() + 1);
     send(res, 200, { ok: true });
   });
 
   // ---------- static ----------
   const serveStatic = (req, res, pathname) => {
-    let file = path.normalize(path.join(PUBLIC_DIR, decodeURIComponent(pathname)));
+    let decoded;
+    try { decoded = decodeURIComponent(pathname); } catch { throw new HttpError(400, 'Некорректный адрес'); }
+    let file = path.normalize(path.join(PUBLIC_DIR, decoded));
     if (file !== PUBLIC_DIR && !file.startsWith(PUBLIC_DIR + path.sep)) throw new HttpError(403, 'Запрещено');
     if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) file = path.join(PUBLIC_DIR, 'index.html');
+    const ext = path.extname(file);
     res.writeHead(200, {
-      'Content-Type': STATIC_TYPES[path.extname(file)] ?? 'application/octet-stream',
+      'Content-Type': STATIC_TYPES[ext] ?? 'application/octet-stream',
       'X-Content-Type-Options': 'nosniff',
+      // код приложения всегда перепроверяется — обновления видны сразу; иконки можно кэшировать
+      'Cache-Control': ext === '.png' || ext === '.svg' ? 'public, max-age=86400' : 'no-cache',
     });
+    if (req.method === 'HEAD') return res.end();
     fs.createReadStream(file).pipe(res);
   };
 
@@ -520,11 +539,4 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
   });
   server.on('close', () => db.close());
   return server;
-}
-
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const port = Number(process.env.PORT) || 3000;
-  createApp({ dataDir: process.env.DATA_DIR }).listen(port, () => {
-    console.log(`NEYAMI запущен: http://localhost:${port}`);
-  });
 }

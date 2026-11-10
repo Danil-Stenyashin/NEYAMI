@@ -16,11 +16,16 @@ const fmt = (sec) => {
 };
 
 async function api(path, { method = 'GET', body, headers } = {}) {
-  const res = await fetch(path, {
-    method,
-    headers: body !== undefined ? { 'Content-Type': 'application/json', ...headers } : headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      method,
+      headers: body !== undefined ? { 'Content-Type': 'application/json', ...headers } : headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  } catch {
+    throw new Error('Нет связи с сервером NEYAMI — проверьте, что он запущен и вы в той же сети');
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `Ошибка ${res.status}`);
   return data;
@@ -59,7 +64,9 @@ const state = {
 function closeSegment() {
   const c = state.cur;
   if (!c || c.segStart == null) return;
-  if (c.lastT - c.segStart >= 0.5) c.segments.push([c.segStart, c.lastT]);
+  // Отрезок, начатый с нашей же подсказки (быстрый поиск, кнопка ⤓), не засчитываем:
+  // иначе алгоритм учился бы на собственных догадках и дроп «уползал» бы к началу.
+  if (!c.segSuggested && c.lastT - c.segStart >= 0.5) c.segments.push([c.segStart, c.lastT]);
   c.segStart = null;
 }
 
@@ -106,30 +113,108 @@ function leaveCurrent() {
 
 function playTrack(item, { startAt = 0, preview = false } = {}) {
   leaveCurrent();
+  unlocking = false;
   const { track, reasons = [] } = item;
-  state.cur = {
+  const cur = (state.cur = {
     track, reasons, preview,
     segments: [], seeks: [], segStart: null, lastT: startAt,
-    outcomeSent: false, programmaticSeek: startAt > 0,
-  };
-  audio.src = `/api/tracks/${track.id}/stream`;
-  const begin = () => {
-    if (startAt > 0) {
-      state.cur.programmaticSeek = true;
-      audio.currentTime = startAt;
-    }
-    audio.play().catch(() => {});
-  };
-  audio.addEventListener('loadedmetadata', begin, { once: true });
-  audio.load();
+    outcomeSent: false, programmaticSeek: startAt > 0, segSuggested: startAt > 0,
+  });
+  // Старт с нужной секунды через media fragment (#t=) — так работает и на iPhone,
+  // где метаданные не грузятся до play(). Запасной вариант — перемотка после загрузки.
+  audio.src = `/api/tracks/${track.id}/stream${startAt > 0 ? `#t=${startAt.toFixed(1)}` : ''}`;
+  if (startAt > 0) {
+    audio.addEventListener('loadedmetadata', () => {
+      if (state.cur === cur && Math.abs(audio.currentTime - startAt) > 1) {
+        cur.programmaticSeek = true;
+        audio.currentTime = startAt;
+      }
+    }, { once: true });
+  }
+  audio.play().catch(() => {
+    $('#p-toggle').textContent = '▶'; // браузер не дал запустить звук сам — ждём нажатия ▶
+  });
   if (!preview) sendEvent('play');
   renderPlayer();
+  updateMediaSession(track);
   loadHeat(track);
 }
 
+// ---------- iPhone: «разблокировка» звука первым касанием ----------
+// Safari разрешает звук только из жеста пользователя. Волна же сначала ходит на сервер,
+// и play() после await был бы заблокирован. Поэтому при первом касании проигрываем
+// тишину на том же <audio> — дальше он «разблокирован» навсегда.
+let unlocked = false;
+let unlocking = false;
+let silentUrl = null;
+function silentWav() {
+  const n = 800;
+  const buf = new ArrayBuffer(44 + n);
+  const v = new DataView(buf);
+  const str = (o, t) => [...t].forEach((ch, i) => v.setUint8(o + i, ch.charCodeAt(0)));
+  str(0, 'RIFF'); v.setUint32(4, 36 + n, true); str(8, 'WAVE'); str(12, 'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, 8000, true); v.setUint32(28, 8000, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true);
+  str(36, 'data'); v.setUint32(40, n, true);
+  for (let i = 0; i < n; i++) v.setUint8(44 + i, 128);
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+}
+function unlockAudio() {
+  if (unlocked) return;
+  unlocked = true;
+  if (audio.src) return; // уже что-то играет — значит, разблокирован
+  silentUrl = silentWav();
+  unlocking = true;
+  audio.src = silentUrl;
+  audio.play().then(() => {
+    if (audio.src === silentUrl) { audio.pause(); audio.removeAttribute('src'); }
+  }).catch(() => {}).finally(() => { unlocking = false; });
+}
+for (const ev of ['touchend', 'click', 'keydown']) document.addEventListener(ev, unlockAudio, { capture: true });
+
+// ---------- Экран блокировки, наушники, клавиши мультимедиа ----------
+function updateMediaSession(track) {
+  if (!('mediaSession' in navigator)) return;
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: track.title,
+      artist: track.artist.username,
+      album: 'NEYAMI',
+      artwork: [
+        { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png' },
+        { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png' },
+      ],
+    });
+  } catch { /* старые браузеры */ }
+}
+if ('mediaSession' in navigator) {
+  const handlers = {
+    play: () => audio.play(),
+    pause: () => audio.pause(),
+    nexttrack: () => (state.mode === 'preview' ? previewAction('no') : next()),
+    previoustrack: () => { audio.currentTime = 0; },
+    seekto: (d) => { if (Number.isFinite(d.seekTime)) audio.currentTime = d.seekTime; },
+  };
+  for (const [action, fn] of Object.entries(handlers)) {
+    try { navigator.mediaSession.setActionHandler(action, fn); } catch { /* не поддерживается */ }
+  }
+}
+let lastPositionUpdate = 0;
+function updatePositionState() {
+  if (!('mediaSession' in navigator) || !navigator.mediaSession.setPositionState) return;
+  if (!(audio.duration > 0) || Date.now() - lastPositionUpdate < 1000) return;
+  lastPositionUpdate = Date.now();
+  try {
+    navigator.mediaSession.setPositionState({ duration: audio.duration, position: Math.min(audio.currentTime, audio.duration), playbackRate: audio.playbackRate });
+  } catch { /* ignore */ }
+}
+
 audio.addEventListener('playing', () => {
+  if (unlocking) return;
   const c = state.cur;
   if (c && c.segStart == null) c.segStart = c.lastT = audio.currentTime;
+  // если старт с дропа прошёл без события перемотки — следующая перемотка уже от человека
+  if (c && c.programmaticSeek && !audio.seeking) c.programmaticSeek = false;
   $('#p-toggle').textContent = '⏸';
   $('.wave-btn')?.classList.add('playing');
 });
@@ -139,6 +224,7 @@ audio.addEventListener('pause', () => {
   $('.wave-btn')?.classList.remove('playing');
 });
 audio.addEventListener('timeupdate', () => {
+  updatePositionState();
   const c = state.cur;
   if (c && !audio.seeking && !audio.paused) {
     if (c.segStart == null) c.segStart = audio.currentTime;
@@ -152,11 +238,13 @@ audio.addEventListener('seeked', () => {
   if (!c) return;
   // перемотку, сделанную человеком, считаем сигналом «вот здесь интересно»
   if (!c.programmaticSeek) c.seeks.push(audio.currentTime);
+  c.segSuggested = c.programmaticSeek; // дальше слушают либо с нашей подсказки, либо с выбранного места
   c.programmaticSeek = false;
   c.segStart = audio.paused ? null : audio.currentTime;
   c.lastT = audio.currentTime;
 });
 audio.addEventListener('ended', () => {
+  if (unlocking || !state.cur) return;
   const c = state.cur;
   if (c && !c.outcomeSent && !c.preview) { sendEvent('complete'); c.outcomeSent = true; }
   if (c?.preview) return; // быстрый поиск сам управляет переходами
@@ -577,7 +665,8 @@ async function renderQuick() {
     <p class="muted">Каждый трек звучит ${PREVIEW_SEC} секунд с самого сильного момента — его NEYAMI определяет сама по тому,
     что люди слушают и куда перематывают. Оценивайте — волна учится в разы быстрее.</p>
     <div class="card quick" id="quick"><p class="muted">Подбираю…</p></div>
-    <p class="muted keys">← не моё · → нравится · пробел — пауза · ↓ слушать целиком</p>`;
+    <p class="muted keys">← не моё · → нравится · пробел — пауза · ↓ слушать целиком</p>
+    <p class="muted keys touch-only">Свайп вправо — нравится, влево — не моё</p>`;
   document.addEventListener('keydown', previewKeys);
   preview.items = [];
   await previewNext();
@@ -623,6 +712,18 @@ async function previewNext(outcome) {
   box.onclick = (e) => {
     const b = e.target.closest('button[data-q]');
     if (b) previewAction(b.dataset.q);
+  };
+  // Свайпы на телефоне: вправо — нравится, влево — не моё
+  let touch = null;
+  box.ontouchstart = (e) => { touch = { x: e.touches[0].clientX, y: e.touches[0].clientY }; };
+  box.ontouchend = (e) => {
+    if (!touch) return;
+    const dx = e.changedTouches[0].clientX - touch.x;
+    const dy = e.changedTouches[0].clientY - touch.y;
+    touch = null;
+    if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+      previewAction(dx > 0 ? 'yes' : 'no');
+    }
   };
   playTrack(item, { startAt: t.moment.start, preview: true });
   clearInterval(preview.timer);
@@ -750,7 +851,7 @@ async function renderTaste() {
     } else if (el.dataset.undo) setTag(el.dataset.undo, null);
     else if (el.dataset.forget) {
       await api(`/api/taste/tracks/${el.dataset.forget}`, { method: 'DELETE' });
-      toast('Забыто');
+      toast('Забыто: волна больше на него не опирается, лайк остался');
       state.profile = null;
       renderTaste();
     }
@@ -915,9 +1016,9 @@ function renderAccount() {
     <a href="#/u/${encodeURIComponent(state.me.username)}">${esc(state.me.username)}</a>
     <button id="logout">Выйти</button>`;
   $('#logout').onclick = async () => {
-    await api('/api/logout', { method: 'POST' });
-    leaveCurrent();
+    leaveCurrent(); // сначала отправляем итог прослушивания, пока сессия ещё жива
     audio.pause();
+    await api('/api/logout', { method: 'POST' }).catch(() => {});
     Object.assign(state, { me: null, cur: null, queue: [], mode: null, settings: null, profile: null });
     renderPlayer();
     renderAccount();
@@ -944,8 +1045,30 @@ addEventListener('pagehide', () => {
 });
 
 window.addEventListener('hashchange', router);
-(async () => {
-  state.me = (await api('/api/me').catch(() => ({}))).user ?? null;
+// Офлайн-оболочка и установка как приложения (работает на https и на localhost)
+if ('serviceWorker' in navigator && window.isSecureContext) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
+
+// Запуск. Если сервер недоступен (компьютер выключен, другой Wi-Fi) — не делаем вид,
+// что человек вышел из аккаунта, а честно говорим, что нет связи, и переподключаемся.
+let booted = false;
+let retryTimer = null;
+async function boot() {
+  clearTimeout(retryTimer);
+  try {
+    const { user } = await api('/api/me');
+    state.me = user ?? null;
+  } catch {
+    $('#offline').classList.remove('hidden');
+    if (!booted) view.innerHTML = '<p class="muted">Ждём сервер NEYAMI…</p>';
+    retryTimer = setTimeout(boot, 5000);
+    return;
+  }
+  $('#offline').classList.add('hidden');
+  booted = true;
   renderAccount();
   router();
-})();
+}
+window.addEventListener('online', boot);
+boot();

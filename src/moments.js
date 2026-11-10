@@ -70,6 +70,9 @@ export function bestMoment(heat, duration, energyPeak = null) {
   }
   const total = score.reduce((a, b) => a + b, 0);
   if (total < MIN_LISTENERS) return fallback();
+  // Слабые данные слушателей не перебивают анализ звука: ждём уверенности хотя бы 50%
+  const confidence = Math.min(1, total / Math.max(10, listeners * 2));
+  if (confidence < 0.5 && Number.isFinite(energyPeak) && energyPeak >= 0) return fallback();
 
   const winBins = Math.max(1, Math.round((win / dur) * BINS));
   let best = 0;
@@ -87,7 +90,7 @@ export function bestMoment(heat, duration, energyPeak = null) {
     start: round(start),
     end: round(start + win),
     source: 'listeners',
-    confidence: Math.min(1, total / Math.max(10, listeners * 2)),
+    confidence,
   };
 }
 

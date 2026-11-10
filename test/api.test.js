@@ -140,3 +140,20 @@ test('старая база без новых колонок дополняет�
   assert.ok(db.prepare('PRAGMA table_info(wave_settings)').all().some((c) => c.name === 'context'));
   db.close();
 });
+
+test('«забыть трек» убирает его из вкуса, но лайк остаётся в коллекции', async () => {
+  const a = client();
+  await a('/api/register', { method: 'POST', json: { username: 'forgetful_artist', password: 'password1' } });
+  const { data } = await a('/api/tracks?title=Memo&tags=forgettag', { method: 'POST', body: fakeAudio, headers: { 'content-type': 'audio/mpeg' } });
+  const id = data.track.id;
+  const u = client();
+  await u('/api/register', { method: 'POST', json: { username: 'forgetful', password: 'password1' } });
+  await u(`/api/tracks/${id}/react`, { method: 'POST', json: { value: 1 } });
+  assert.ok((await u('/api/taste')).data.profile.topTags.some(([t]) => t === 'forgettag'));
+  await u(`/api/taste/tracks/${id}`, { method: 'DELETE' });
+  assert.ok(!(await u('/api/taste')).data.profile.topTags.some(([t]) => t === 'forgettag'), 'вкус забыл');
+  assert.ok((await u('/api/likes')).data.tracks.some((t) => t.id === id), 'лайк остался');
+  // новая оценка после «забыть» снова учитывается
+  await u(`/api/tracks/${id}/react`, { method: 'POST', json: { value: 1 } });
+  assert.ok((await u('/api/taste')).data.profile.topTags.some(([t]) => t === 'forgettag'), 'новая оценка учитывается');
+});
