@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NEYAMI</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%23ff5a36'/></svg>">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top">
+    <a class="logo" href="#/wave">NEYAMI</a>
+    <nav>
+      <a href="#/wave" data-nav="wave">Волна</a>
+      <a href="#/quick" data-nav="quick">⚡ Быстрый поиск</a>
+      <a href="#/new" data-nav="new">Новое</a>
+      <a href="#/following" data-nav="following">Подписки</a>
+      <a href="#/likes" data-nav="likes">Мне нравится</a>
+      <a href="#/upload" data-nav="upload">Загрузить</a>
+    </nav>
+    <form id="search" class="search"><input name="q" type="search" placeholder="Треки, артисты, #теги"></form>
+    <div id="account" class="account"></div>
+  </header>
+
+  <main id="view"></main>
+
+  <footer id="player" class="player hidden">
+    <div class="p-info">
+      <div class="p-title" id="p-title"></div>
+      <div class="p-artist" id="p-artist"></div>
+    </div>
+    <div class="p-controls">
+      <button id="p-dislike" title="Не то (волна учтёт)">👎</button>
+      <button id="p-toggle" class="big" title="Пауза / играть">▶</button>
+      <button id="p-next" title="Дальше">⏭</button>
+      <button id="p-like" title="Нравится">♡</button>
+      <button id="p-drop" title="К лучшему моменту">⤓</button>
+    </div>
+    <div class="p-progress">
+      <span id="p-time">0:00</span>
+      <div class="seek-wrap">
+        <canvas id="p-heat" title="Где слушают чаще всего; выделен лучший момент"></canvas>
+        <input id="p-seek" type="range" min="0" max="1000" value="0">
+      </div>
+      <span id="p-dur">0:00</span>
+    </div>
+    <div class="p-reasons" id="p-reasons"></div>
+  </footer>
+
+  <audio id="audio" preload="auto"></audio>
+  <div id="toast" class="toast"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
