@@ -236,7 +236,8 @@ export function createApp({ dataDir = path.join(ROOT, 'data'), fetchImpl = globa
     send(res, 200, { ok: true }, { 'Set-Cookie': 'sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0' });
   });
 
-  route('GET', '/api/me', async (req, res) => send(res, 200, { user: currentUser(req) }));
+  const VERSION = (() => { try { return JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version; } catch { return ''; } })();
+  route('GET', '/api/me', async (req, res) => send(res, 200, { user: currentUser(req), version: VERSION }));
 
   // Лента / поиск. Сортировка только по времени или по явным метрикам — никакой скрытой «выдачи».
   route('GET', '/api/tracks', async (req, res, _p, url) => {

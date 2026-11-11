@@ -416,3 +416,6 @@ body.embed-open .main { padding-bottom: calc(320px + env(safe-area-inset-bottom)
 .onboard p { margin: 0 0 16px; }
 .onboard a, #starter-status a { color: var(--accent); }
 .onboard-status, #starter-status { margin-top: 14px; font-size: 14px; line-height: 1.7; }
+.account { flex-wrap: wrap; }
+.version { flex-basis: 100%; font-size: 11px; color: var(--faint); padding-left: 38px; margin-top: 2px; }
+@media (max-width: 760px) { .version { display: none; } }

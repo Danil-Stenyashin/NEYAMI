@@ -340,6 +340,7 @@ async function refillWave(append = false) {
     const data = await api(`/api/wave?count=10&tz=${TZ}&exclude=${exclude}`);
     for (const it of data.items) state.seen.add(it.track.id);
     state.queue = append ? state.queue.concat(data.items) : data.items;
+    state.waveEmpty = !state.queue.length && !state.cur;
     if (data.items.length === 0 && state.seen.size) {
       state.seen = new Set(state.cur ? [state.cur.track.id] : []); // каталог закончился — начинаем новый круг
     }
@@ -708,7 +709,23 @@ function renderQueue() {
   $('#queue-title').textContent = state.mode === 'bridge'
     ? `Переход от #${state.bridge.from} к #${state.bridge.to}` : 'Дальше';
   if (!state.queue.length) {
-    el.innerHTML = `<p class="muted">${state.mode ? 'Подбираю…' : 'Нажмите «Моя волна», чтобы начать.'}</p>`;
+    if (state.mode === 'wave' && state.waveEmpty) {
+      // Волне не из чего выбирать — честно говорим и сразу предлагаем решение
+      el.innerHTML = `
+        <div class="card onboard">
+          <div class="onboard-title">В NEYAMI пока нет музыки</div>
+          <p class="muted">Соберу около 25 треков свободной музыки восьми жанров — минута-две.
+            Или <a href="#/upload/folder">добавьте свою папку</a>.</p>
+          <button class="primary" id="queue-starter">Собрать музыку</button>
+          <div id="queue-starter-status" class="onboard-status"></div>
+        </div>`;
+      $('#queue-starter').onclick = async (e) => {
+        const n = await runStarter(e.target.closest('button'), $('#queue-starter-status'));
+        if (n) { state.waveEmpty = false; state.profile = null; startWave(); }
+      };
+      return;
+    }
+    el.innerHTML = `<p class="muted">${state.mode ? 'Подбираю…' : 'Нажмите «Включить мою волну», чтобы начать.'}</p>`;
     return;
   }
   renderTrackList(el, state.queue, { mode: state.mode });
@@ -1570,7 +1587,8 @@ function renderAccount() {
   }
   el.innerHTML = `<a class="who" href="#/u/${encodeURIComponent(state.me.username)}" title="Мой профиль">
       <span class="avatar">${esc(state.me.username.slice(0, 1).toUpperCase())}</span><span>${esc(state.me.username)}</span></a>
-    <button id="logout" class="icon-btn" title="Выйти">${icon('logout')}</button>`;
+    <button id="logout" class="icon-btn" title="Выйти">${icon('logout')}</button>
+    ${state.version ? `<span class="version">версия ${esc(state.version)}</span>` : ''}`;
   $('#logout').onclick = async () => {
     leaveCurrent(); // сначала отправляем итог прослушивания, пока сессия ещё жива
     audio.pause();
@@ -1613,8 +1631,9 @@ let retryTimer = null;
 async function boot() {
   clearTimeout(retryTimer);
   try {
-    const { user } = await api('/api/me');
+    const { user, version } = await api('/api/me');
     state.me = user ?? null;
+    state.version = version;
   } catch {
     $('#offline').classList.remove('hidden');
     if (!booted) view.innerHTML = '<p class="muted">Ждём сервер NEYAMI…</p>';
