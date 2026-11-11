@@ -15,9 +15,12 @@ before(async () => {
   await new Promise((r) => server.listen(0, r));
   base = `http://127.0.0.1:${server.address().port}`;
 });
-after(() => {
-  server.close();
-  fs.rmSync(dir, { recursive: true, force: true });
+after(async () => {
+  // Сначала закрываем соединения и дожидаемся закрытия сервера (и базы) — Windows не даёт
+  // удалить открытый файл, в отличие от Linux
+  server.closeAllConnections();
+  await new Promise((r) => server.close(r));
+  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 });
 
 function client() {

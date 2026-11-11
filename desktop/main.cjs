@@ -177,7 +177,8 @@ function notify(title, body) {
 
 // ---------- трей ----------
 function createTray() {
-  const img = nativeImage.createFromPath(ICON).resize({ width: IS_WIN ? 16 : 18, height: IS_WIN ? 16 : 18 });
+  // 32 px: Windows сам ужмёт до 16 на обычных экранах и возьмёт как есть на экранах высокой чёткости
+  const img = nativeImage.createFromPath(path.join(ROOT, 'public', 'icons', 'favicon-32.png'));
   tray = new Tray(img);
   tray.setToolTip('NEYAMI');
   tray.on('click', showWindow);
