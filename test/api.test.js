@@ -1,0 +1,162 @@
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createApp } from '../src/server.js';
+
+let server;
+let base;
+let dir;
+
+before(async () => {
+  dir = fs.mkdtempSync(path.join(os.tmpdir(), 'neyami-'));
+  server = createApp({ dataDir: dir });
+  await new Promise((r) => server.listen(0, r));
+  base = `http://127.0.0.1:${server.address().port}`;
+});
+after(async () => {
+  // Сначала закрываем соединения и дожидаемся закрытия сервера (и базы) — Windows не даёт
+  // удалить открытый файл, в отличие от Linux
+  server.closeAllConnections();
+  await new Promise((r) => server.close(r));
+  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+});
+
+function client() {
+  let cookie = '';
+  return async (p, { method = 'GET', json, body, headers = {} } = {}) => {
+    const res = await fetch(base + p, {
+      method,
+      headers: { ...(cookie && { cookie }), ...(json && { 'content-type': 'application/json' }), ...headers },
+      body: json ? JSON.stringify(json) : body,
+    });
+    const set = res.headers.get('set-cookie');
+    if (set) cookie = set.split(';')[0];
+    const ct = res.headers.get('content-type') ?? '';
+    return { status: res.status, headers: res.headers, data: ct.includes('json') ? await res.json() : await res.arrayBuffer() };
+  };
+}
+
+const fakeAudio = Buffer.alloc(4096, 7);
+
+test('полный путь: регистрация → загрузка → волна → стрим → тепловая карта → вкус', async () => {
+  const artist = client();
+  const listener = client();
+  assert.equal((await artist('/api/register', { method: 'POST', json: { username: 'artist', password: 'password1' } })).status, 200);
+  assert.equal((await listener('/api/register', { method: 'POST', json: { username: 'fan', password: 'password1' } })).status, 200);
+
+  const up = await artist('/api/tracks?title=Drop&tags=dnb,%23Energy&duration=200&peak=90', {
+    method: 'POST', body: fakeAudio, headers: { 'content-type': 'audio/mpeg' },
+  });
+  assert.equal(up.status, 201);
+  const track = up.data.track;
+  assert.deepEqual(track.tags, ['dnb', 'energy']);
+  assert.equal(track.moment.source, 'audio');
+
+  // неаудио отклоняется
+  const bad = await artist('/api/tracks?title=x', { method: 'POST', body: 'hi', headers: { 'content-type': 'text/html' } });
+  assert.equal(bad.status, 415);
+
+  const wave = await listener('/api/wave');
+  assert.equal(wave.data.items[0].track.id, track.id);
+  assert.ok(wave.data.items[0].reasons.length);
+
+  // Range-запрос для перемотки
+  const part = await listener(`/api/tracks/${track.id}/stream`, { headers: { range: 'bytes=100-199' } });
+  assert.equal(part.status, 206);
+  assert.equal(part.data.byteLength, 100);
+  assert.equal(part.headers.get('content-range'), `bytes 100-199/${fakeAudio.length}`);
+
+  // прослушивание с перемоткой → тепловая карта
+  for (let i = 0; i < 4; i++) {
+    const l = await listener(`/api/tracks/${track.id}/listen`, {
+      method: 'POST', json: { duration: 200, segments: [[0, 10], [120, 140]], seeks: [120] },
+    });
+    assert.equal(l.status, 201);
+  }
+  const heat = await listener(`/api/tracks/${track.id}/heat`);
+  assert.equal(heat.data.heat.seeks[60], 4);
+  assert.equal(heat.data.moment.source, 'listeners');
+
+  // события и режим «не запоминать»
+  assert.equal((await listener('/api/events', { method: 'POST', json: { track_id: track.id, type: 'complete' } })).status, 201);
+  await listener('/api/wave/settings', { method: 'PUT', json: { private_mode: true } });
+  const priv = await listener('/api/events', { method: 'POST', json: { track_id: track.id, type: 'skip', position: 1 } });
+  assert.equal(priv.data.stored, false);
+
+  // вкус: тег виден, его можно заблокировать — тогда трек пропадает из волны
+  const taste = await listener('/api/taste');
+  assert.ok(taste.data.profile.topTags.some(([t]) => t === 'dnb'));
+  await listener('/api/taste/tags', { method: 'PUT', json: { tag: 'dnb', action: 'block' } });
+  assert.equal((await listener('/api/wave')).data.items.length, 0);
+
+  // жалобы — только по юридическим причинам
+  assert.equal((await listener(`/api/tracks/${track.id}/report`, { method: 'POST', json: { reason: 'dislike' } })).status, 400);
+  assert.equal((await listener(`/api/tracks/${track.id}/report`, { method: 'POST', json: { reason: 'copyright' } })).status, 201);
+
+  // удалить чужой трек нельзя
+  assert.equal((await listener(`/api/tracks/${track.id}`, { method: 'DELETE' })).status, 403);
+  assert.equal((await artist(`/api/tracks/${track.id}`, { method: 'DELETE' })).status, 200);
+});
+
+test('без входа волна недоступна, статика защищена от выхода из папки', async () => {
+  const anon = client();
+  assert.equal((await anon('/api/wave')).status, 401);
+  const res = await fetch(`${base}/..%2f..%2fpackage.json`);
+  const text = await res.text();
+  assert.ok(!text.includes('"name": "neyami"'));
+});
+
+test('признаки звука сохраняются при загрузке, мусор отбрасывается', async () => {
+  const c = client();
+  await c('/api/register', { method: 'POST', json: { username: 'producer', password: 'password1' } });
+  const features = { bpm: 128, energy: 0.7, brightness: 0.5, dynamics: 0.4, percussive: 0.8 };
+  const ok = await c(`/api/tracks?title=Beat&features=${encodeURIComponent(JSON.stringify(features))}`, {
+    method: 'POST', body: fakeAudio, headers: { 'content-type': 'audio/ogg' },
+  });
+  assert.deepEqual(ok.data.track.features, features);
+  const junk = await c('/api/tracks?title=Junk&features=%7Bbroken', { method: 'POST', body: fakeAudio, headers: { 'content-type': 'audio/ogg' } });
+  assert.equal(junk.data.track.features, null);
+
+  const listener = client();
+  await listener('/api/register', { method: 'POST', json: { username: 'night_listener', password: 'password1' } });
+  const taste = await listener('/api/taste?tz=-180');
+  assert.equal(taste.data.profile.bySlot.length, 8);
+  await listener('/api/wave/settings', { method: 'PUT', json: { context: false } });
+  assert.equal((await listener('/api/wave/settings')).data.settings.context, 0);
+});
+
+test('старая база без новых колонок дополняется при запуске', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const { openDb } = await import('../src/db.js');
+  const file = path.join(dir, 'old.db');
+  const old = new DatabaseSync(file);
+  old.exec(`CREATE TABLE tracks (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT ',', explicit INTEGER NOT NULL DEFAULT 0,
+    file TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, duration REAL, energy_peak REAL, created_at INTEGER NOT NULL);
+    CREATE TABLE wave_settings (user_id INTEGER PRIMARY KEY, discovery REAL NOT NULL DEFAULT 0.5,
+    underground REAL NOT NULL DEFAULT 0.5, hide_explicit INTEGER NOT NULL DEFAULT 0, private_mode INTEGER NOT NULL DEFAULT 0);`);
+  old.close();
+  const db = openDb(file);
+  assert.ok(db.prepare('PRAGMA table_info(tracks)').all().some((c) => c.name === 'features'));
+  assert.ok(db.prepare('PRAGMA table_info(wave_settings)').all().some((c) => c.name === 'context'));
+  db.close();
+});
+
+test('«забыть трек» убирает его из вкуса, но лайк остаётся в коллекции', async () => {
+  const a = client();
+  await a('/api/register', { method: 'POST', json: { username: 'forgetful_artist', password: 'password1' } });
+  const { data } = await a('/api/tracks?title=Memo&tags=forgettag', { method: 'POST', body: fakeAudio, headers: { 'content-type': 'audio/mpeg' } });
+  const id = data.track.id;
+  const u = client();
+  await u('/api/register', { method: 'POST', json: { username: 'forgetful', password: 'password1' } });
+  await u(`/api/tracks/${id}/react`, { method: 'POST', json: { value: 1 } });
+  assert.ok((await u('/api/taste')).data.profile.topTags.some(([t]) => t === 'forgettag'));
+  await u(`/api/taste/tracks/${id}`, { method: 'DELETE' });
+  assert.ok(!(await u('/api/taste')).data.profile.topTags.some(([t]) => t === 'forgettag'), 'вкус забыл');
+  assert.ok((await u('/api/likes')).data.tracks.some((t) => t.id === id), 'лайк остался');
+  // новая оценка после «забыть» снова учитывается
+  await u(`/api/tracks/${id}/react`, { method: 'POST', json: { value: 1 } });
+  assert.ok((await u('/api/taste')).data.profile.topTags.some(([t]) => t === 'forgettag'), 'новая оценка учитывается');
+});

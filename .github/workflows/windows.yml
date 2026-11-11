@@ -1,0 +1,94 @@
+# Сборка установщика NEYAMI для Windows и проверка на настоящей Windows:
+# установить → запустить → убедиться, что окно открылось, каталог на месте и звук играет.
+name: Windows-приложение
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+    paths:
+      - 'desktop/**'
+      - 'src/**'
+      - 'public/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write # чтобы при теге v* выложить установщик в Releases
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Установка зависимостей
+        run: npm ci
+
+      - name: Тесты
+        run: npm test
+
+      - name: Сборка установщика
+        run: npm run dist:win
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false' # без цифровой подписи
+
+      - name: Проверка на Windows — установка и запуск
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Get-ChildItem dist\NEYAMI-Setup-*.exe | Select-Object -First 1
+          Write-Host ("Установщик: {0}, {1:N0} МБ" -f $setup.Name, ($setup.Length / 1MB))
+
+          Start-Process $setup.FullName -ArgumentList '/S' -Wait
+          Start-Sleep -Seconds 3
+          Get-Process NEYAMI -ErrorAction SilentlyContinue | Stop-Process -Force
+          $app = Join-Path $env:LOCALAPPDATA 'Programs\NEYAMI\NEYAMI.exe'
+          if (-not (Test-Path $app)) { throw "NEYAMI.exe не найден после установки: $app" }
+          Write-Host "Установлено: $app"
+          $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'NEYAMI.lnk'
+          Write-Host "Ярлык на рабочем столе: $(Test-Path $lnk)"
+
+          $env:NEYAMI_SMOKE = Join-Path $env:RUNNER_TEMP 'neyami-window.png'
+          $p = Start-Process $app -PassThru
+          $p | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue
+          if (-not $p.HasExited) { $p | Stop-Process -Force; throw 'Приложение не завершило самопроверку за 2 минуты' }
+          if (-not (Test-Path $env:NEYAMI_SMOKE)) { throw 'Окно приложения не открылось (нет снимка)' }
+
+          $report = Get-Content "$($env:NEYAMI_SMOKE).json" -Raw | ConvertFrom-Json
+          Write-Host '--- Отчёт самопроверки ---'
+          $report | Format-List | Out-String | Write-Host
+          if ($report.brand -ne 'neyami') { throw 'Интерфейс не отрисовался' }
+          if ($report.tracks -lt 20) { throw 'Демо-каталог не создан' }
+
+          $db = Join-Path $env:APPDATA 'NEYAMI\data\neyami.db'
+          Write-Host ("База данных: {0}, {1:N0} КБ" -f $db, ((Get-Item $db).Length / 1KB))
+          Copy-Item $env:NEYAMI_SMOKE dist\neyami-window.png
+
+      - name: Установщик
+        uses: actions/upload-artifact@v4
+        with:
+          name: NEYAMI-Setup-Windows
+          path: dist/NEYAMI-Setup-*.exe
+          retention-days: 30
+
+      - name: Снимок окна с Windows
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshot-windows
+          path: dist/neyami-window.png
+          retention-days: 30
+
+      - name: Выложить в Releases (при теге v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/NEYAMI-Setup-*.exe

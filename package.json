@@ -1,0 +1,77 @@
+{
+  "name": "neyami",
+  "productName": "NEYAMI",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NEYAMI — свободный музыкальный сервис с честной и управляемой волной рекомендаций",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/main.js",
+    "app": "node --disable-warning=ExperimentalWarning src/main.js --open",
+    "preseed": "node scripts/check-node.js",
+    "seed": "node --disable-warning=ExperimentalWarning scripts/seed.js",
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.js\"",
+    "desktop": "electron .",
+    "dist:win": "electron-builder --win nsis --x64 --publish never"
+  },
+  "author": "NEYAMI",
+  "homepage": "https://github.com/danil-stenyashin/neyami",
+  "main": "desktop/main.cjs",
+  "devDependencies": {
+    "electron": "45.3.0",
+    "electron-builder": "26.18.1"
+  },
+  "build": {
+    "appId": "ru.neyami.app",
+    "productName": "NEYAMI",
+    "copyright": "NEYAMI",
+    "asar": false,
+    "directories": {
+      "output": "dist",
+      "buildResources": "desktop/build"
+    },
+    "files": [
+      "desktop/**/*",
+      "src/**/*",
+      "public/**/*",
+      "package.json",
+      "!desktop/build/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "desktop/build/icon.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowElevation": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "NEYAMI",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "NEYAMI-Setup-${version}.exe"
+    },
+    "mac": {
+      "category": "public.app-category.music",
+      "icon": "desktop/build/icon.png"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Audio",
+      "icon": "desktop/build/icon.png"
+    }
+  }
+}
