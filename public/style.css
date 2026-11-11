@@ -292,3 +292,19 @@ main { max-width: 820px; margin: 0 auto; padding: 40px 32px; }
 @media (display-mode: standalone) and (max-width: 760px) {
   .side { padding-top: max(14px, env(safe-area-inset-top)); }
 }
+
+/* ---------- упрощённый экран волны ---------- */
+.hero h1 { margin-bottom: 20px; }
+.tune { display: grid; gap: 22px; margin-top: 36px; max-width: 560px; }
+.tune .labels { margin-bottom: 8px; }
+.bridge { margin-top: 32px; max-width: 640px; }
+.bridge .row { gap: 8px; }
+.bridge-label { color: var(--muted); font-size: 14px; margin-right: 4px; }
+.bridge input[type=text] { padding: 8px 10px; }
+.bridge select { padding: 8px; }
+.prefs { display: grid; gap: 14px; }
+.prefs .progress { margin-bottom: 4px; }
+@media (max-width: 760px) {
+  .bridge-label { flex-basis: 100%; }
+  .bridge .row > input[type=text] { min-width: 0; flex: 1 1 40%; }
+}

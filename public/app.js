@@ -423,7 +423,7 @@ function trackRow(item, idx) {
         <span class="stat" title="Лайки">${icon('heart', 12)}${t.likes}</span>
         ${t.tags.map((g) => `<a class="chip tag" href="#/tag/${encodeURIComponent(g)}">#${esc(g)}</a>`).join('')}
       </div>
-      ${item.reasons?.length ? `<div class="why">${item.reasons.map(esc).join(' · ')}</div>` : ''}
+      ${item.reasons?.length ? `<div class="why" title="${esc(item.reasons.join(' · '))}">${esc(item.reasons[0])}</div>` : ''}
     </div>
     <div class="actions">
       <button data-act="drop" class="icon-btn opt" title="С лучшего момента (${fmt(t.moment.start)})">${icon('target')}</button>
@@ -522,13 +522,27 @@ async function renderList(title, url) {
 }
 
 // ---------- Волна ----------
+// Настройки волны сохраняются с небольшой задержкой; изменения копятся и уходят одним запросом
+let pendingSettings = {};
+let settingsTimer;
+function saveSettings(patch, { refill = true } = {}) {
+  Object.assign(state.settings ?? (state.settings = {}), patch);
+  Object.assign(pendingSettings, patch);
+  clearTimeout(settingsTimer);
+  settingsTimer = setTimeout(async () => {
+    const body = pendingSettings;
+    pendingSettings = {};
+    await api('/api/wave/settings', { method: 'PUT', body }).catch((e) => toast(e.message));
+    if (refill && state.mode === 'wave') { state.queue = []; refillWave(); }
+  }, 350);
+}
+
 async function renderWave() {
   if (!state.me) {
     view.innerHTML = `
       <section class="hero">
         <h1>Музыка без цензуры и волна, которая вас слышит</h1>
-        <p class="lead">NEYAMI учится на том, что вы дослушиваете и пропускаете, слышит звучание треков,
-        учитывает время суток и объясняет каждую рекомендацию. Никаких скрытых «продвигаемых» треков.</p>
+        <p class="lead">Учится на том, что вы дослушиваете и пропускаете, и объясняет каждый трек.</p>
         <a href="#/login"><button class="primary wave-btn">Войти или создать аккаунт</button></a>
       </section>`;
     return;
@@ -536,71 +550,44 @@ async function renderWave() {
   if (!state.settings) state.settings = (await api('/api/wave/settings')).settings;
   const s = state.settings;
   const { tags } = await api('/api/tags');
-  const sw = (id, on, text, hint = '') =>
-    `<label class="switch" title="${hint}"><input type="checkbox" id="${id}" ${on ? 'checked' : ''}><span>${text}</span></label>`;
   view.innerHTML = `
     <section class="hero">
       <h1>Моя волна</h1>
-      <p class="lead">Учится на том, что вы дослушиваете и пропускаете, и объясняет каждый трек.</p>
       <button class="primary wave-btn" id="wave-start">
-        ${icon(state.mode === 'wave' ? 'rotate' : 'play', 18)}<span>${state.mode === 'wave' ? 'Перезапустить волну' : 'Слушать'}</span>
+        ${icon(state.mode === 'wave' ? 'rotate' : 'play', 18)}<span>${state.mode === 'wave' ? 'Заново' : 'Слушать'}</span>
       </button>
       <div id="context-line" class="ctx-line"></div>
     </section>
 
-    <section class="card settings">
+    <section class="tune">
       <div class="slider">
-        <div class="labels"><span>Любимое</span><b>Настрой</b><span>Новое</span></div>
+        <div class="labels"><span>Любимое</span><span>Новое</span></div>
         <input type="range" id="discovery" min="0" max="100" value="${Math.round(s.discovery * 100)}" aria-label="Любимое или новое">
       </div>
       <div class="slider">
-        <div class="labels"><span>Популярное</span><span></span><span>Андеграунд</span></div>
+        <div class="labels"><span>Популярное</span><span>Андеграунд</span></div>
         <input type="range" id="underground" min="0" max="100" value="${Math.round(s.underground * 100)}" aria-label="Популярное или андеграунд">
-      </div>
-      <div class="row-opts">
-        ${sw('hide-explicit', s.hide_explicit, 'Скрывать 18+')}
-        ${sw('private-mode', s.private_mode, 'Не запоминать', 'Прослушивания не будут влиять на волну — удобно, если включает гость или ребёнок')}
-        ${sw('context-mode', s.context !== 0, 'Учитывать время суток', 'Утром, ночью и в выходные вкус разный — волна это учитывает')}
       </div>
     </section>
 
-    <h2>Волна-мост</h2>
-    <div class="card bridge">
-      <p class="muted" style="margin-top:0">Плавный переход от одного настроения к другому — по тегам и по звучанию.</p>
+    <section class="bridge">
       <div class="row">
-        <input type="text" id="b-from" list="tags" placeholder="откуда, напр. lofi" value="${esc(state.bridge?.from ?? '')}">
+        <span class="bridge-label">Мост</span>
+        <input type="text" id="b-from" list="tags" placeholder="от, напр. lofi" value="${esc(state.bridge?.from ?? '')}">
         <span class="muted">→</span>
-        <input type="text" id="b-to" list="tags" placeholder="куда, напр. dnb" value="${esc(state.bridge?.to ?? '')}">
+        <input type="text" id="b-to" list="tags" placeholder="к, напр. dnb" value="${esc(state.bridge?.to ?? '')}">
         <select id="b-len" aria-label="Длина моста">${[5, 8, 12, 20].map((n) => `<option ${n === (state.bridge?.length ?? 8) ? 'selected' : ''}>${n}</option>`).join('')}</select>
-        <button id="b-go">Построить</button>
+        <button id="b-go" class="ghost" title="Плавный переход от одного настроения к другому">Построить</button>
       </div>
       <datalist id="tags">${tags.map((t) => `<option value="${esc(t.tag)}">${t.count}</option>`).join('')}</datalist>
-    </div>
+    </section>
 
-    <h2 id="queue-title">Дальше в волне</h2>
+    <h2 id="queue-title">Дальше</h2>
     <div id="queue"></div>`;
 
   $('#wave-start').onclick = startWave;
-  let saveTimer;
-  const save = (patch) => {
-    Object.assign(state.settings, patch);
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(async () => {
-      await api('/api/wave/settings', { method: 'PUT', body: patch }).catch((e) => toast(e.message));
-      if (state.mode === 'wave') { state.queue = []; refillWave(); }
-    }, 350);
-  };
-  $('#discovery').oninput = (e) => save({ discovery: e.target.value / 100 });
-  $('#underground').oninput = (e) => save({ underground: e.target.value / 100 });
-  $('#hide-explicit').onchange = (e) => save({ hide_explicit: e.target.checked });
-  $('#private-mode').onchange = (e) => {
-    save({ private_mode: e.target.checked });
-    toast(e.target.checked ? 'Режим «не запоминать» включён' : 'Волна снова учится на ваших прослушиваниях');
-  };
-  $('#context-mode').onchange = (e) => {
-    save({ context: e.target.checked });
-    toast(e.target.checked ? 'Волна учитывает время суток' : 'Время суток больше не учитывается');
-  };
+  $('#discovery').oninput = (e) => saveSettings({ discovery: e.target.value / 100 });
+  $('#underground').oninput = (e) => saveSettings({ underground: e.target.value / 100 });
   $('#b-go').onclick = startBridge;
   renderQueue();
   if (!state.profile) {
@@ -608,30 +595,25 @@ async function renderWave() {
   } else renderProfileChips();
 }
 
+// Одна короткая строка: что волна о вас думает. Подробности — на странице «Мой вкус».
 function renderProfileChips() {
   const line = $('#context-line');
   if (!line || !state.profile) return;
   const p = state.profile;
   const c = p.context;
-  const lines = [];
-  lines.push(p.topTags.length
-    ? `Ваш вкус: ${p.topTags.slice(0, 5).map(([t]) => `<span class="chip pos">#${esc(t)}</span>`).join(' ')} <a href="#/taste">настроить</a>`
-    : 'Волна пока вас не знает — слушайте и оценивайте треки');
-  if (p.sound) lines.push(`Ваш звук: ${esc(p.sound.text)}`);
-  if (state.settings?.context !== 0 && c) {
-    const when = `${c.slot}${c.weekend ? ' в выходные' : ' в будни'}`;
-    lines.push(c.confidence >= 0.3 && c.topTags.length
-      ? `Сейчас — как обычно ${when}: ${c.topTags.slice(0, 3).map(([t]) => '#' + esc(t)).join(' ')}${c.sound ? ` · ${esc(c.sound)}` : ''}`
-      : `Пока мало слушали ${when} — волна подстроится под это время`);
-  }
-  line.innerHTML = lines.join('<br>');
+  const tags = (c && state.settings?.context !== 0 && c.confidence >= 0.3 && c.topTags.length ? c.topTags : p.topTags)
+    .slice(0, 3).map(([t]) => '#' + esc(t)).join(' ');
+  const when = c && state.settings?.context !== 0 ? `${c.slot[0].toUpperCase()}${c.slot.slice(1)}` : '';
+  line.innerHTML = tags
+    ? `${when ? `${when} · ` : ''}${tags} · <a href="#/taste">мой вкус</a>`
+    : 'Слушайте и оценивайте — волна подстроится под вас';
 }
 
 function renderQueue() {
   const el = $('#queue');
   if (!el) return;
   $('#queue-title').textContent = state.mode === 'bridge'
-    ? `Мост #${state.bridge.from} → #${state.bridge.to}` : 'Дальше в волне';
+    ? `Мост #${state.bridge.from} → #${state.bridge.to}` : 'Дальше';
   if (!state.queue.length) {
     el.innerHTML = `<p class="muted">${state.mode ? 'Подбираю…' : 'Нажмите «Моя волна», чтобы начать.'}</p>`;
     return;
@@ -677,7 +659,7 @@ async function renderQuick() {
   if (!requireLogin()) return;
   view.innerHTML = `
     <h1>Быстрый поиск</h1>
-    <p class="lead">${PREVIEW_SEC} секунд с самого сильного момента каждого трека. Оценивайте — волна учится в разы быстрее.</p>
+    <p class="lead">По ${PREVIEW_SEC} секунд с лучшего момента каждого трека.</p>
     <div class="card quick" id="quick"><p class="muted">Подбираю…</p></div>
     <p class="keys">← не моё · → нравится · пробел — пауза · ↓ слушать целиком</p>
     <p class="keys touch-only">Свайп вправо — нравится, влево — не моё</p>`;
@@ -715,7 +697,7 @@ async function previewNext(outcome) {
     <div class="q-title">${esc(t.title)} ${t.explicit ? '<span class="badge">18+</span>' : ''}</div>
     <div class="q-artist"><a href="#/u/${encodeURIComponent(t.artist.username)}">${esc(t.artist.username)}</a></div>
     <div class="chips">${t.tags.map((g) => `<span class="chip">#${esc(g)}</span>`).join('')}${t.features?.bpm ? `<span class="chip">${t.features.bpm} BPM</span>` : ''}</div>
-    <div class="why">${item.reasons.map(esc).join(' · ')}</div>
+    <div class="why">${esc(item.reasons[0] ?? '')}</div>
     <div class="q-moment">с ${fmt(t.moment.start)} · ${{ listeners: 'лучший момент определили слушатели', audio: 'лучший момент — по анализу звука', default: 'пока мало данных' }[t.moment.source]}</div>
     <div class="progress"><div id="q-bar"></div></div>
     <div class="q-actions">
@@ -786,14 +768,16 @@ async function renderTaste() {
   const pct = Math.round(profile.confidence * 100);
   view.innerHTML = `
     <h1>Мой вкус</h1>
-    <p class="lead">Всё, что волна знает о вас. Никаких скрытых данных — и всё можно поправить.</p>
+    <p class="lead">Всё, что волна знает о вас. Скрытых данных нет — всё можно поправить.</p>
 
-    <div class="card">
-      <div class="row" style="justify-content:space-between">
-        <div>Насколько волна вас знает: <b>${pct}%</b></div>
-        <label class="switch"><input type="checkbox" id="t-private" ${settings.private_mode ? 'checked' : ''}><span>Не запоминать прослушивания</span></label>
-      </div>
-      <div class="progress" style="margin-top:12px"><div style="width:${pct}%"></div></div>
+    <div class="card prefs">
+      <div>Волна знает вас на <b>${pct}%</b></div>
+      <div class="progress"><div style="width:${pct}%"></div></div>
+      <label class="switch" title="Прослушивания не влияют на волну — если включает гость или ребёнок">
+        <input type="checkbox" id="t-private" ${settings.private_mode ? 'checked' : ''}><span>Не запоминать прослушивания</span></label>
+      <label class="switch" title="Утром, ночью и в выходные вкус разный">
+        <input type="checkbox" id="t-context" ${settings.context !== 0 ? 'checked' : ''}><span>Учитывать время суток</span></label>
+      <label class="switch"><input type="checkbox" id="t-explicit" ${settings.hide_explicit ? 'checked' : ''}><span>Скрывать 18+</span></label>
     </div>
 
     ${profile.sound ? `<h2>Ваш звук</h2>
@@ -803,10 +787,9 @@ async function renderTaste() {
         ${[['energy', 'Энергия'], ['percussive', 'Ударность'], ['brightness', 'Яркость'], ['dynamics', 'Динамика']].map(([k, label]) => `
           <div class="taste-tag"><span>${label}</span><div class="meter"><div class="pos" style="width:${Math.round(profile.sound[k] * 100)}%"></div></div><span class="muted">${Math.round(profile.sound[k] * 100)}%</span></div>`).join('')}
       </div>
-      <p class="muted" style="margin-bottom:0">Волна сравнивает треки по звучанию, поэтому находит похожее даже без тегов.</p>
     </div>` : ''}
 
-    <h2>Вкус по времени суток ${settings.context === 0 ? '<span class="muted">(выключено на странице волны)</span>' : ''}</h2>
+    <h2>По времени суток ${settings.context === 0 ? '<span class="muted">· выключено</span>' : ''}</h2>
     <div class="slots">
       ${profile.bySlot.map((sl) => `
         <div class="slot card ${sl.hour === Math.floor(localHourNow() / 6) * 6 + 3 && sl.weekend === isWeekendNow() ? 'now' : ''}">
@@ -837,8 +820,8 @@ async function renderTaste() {
       </div>
     </div>
 
-    <h2>Что сильнее всего повлияло на волну</h2>
-    <p class="muted">Включили что-то случайно? «Забыть» — и волна перестанет на это опираться. Лайк при этом останется.</p>
+    <h2>Сильнее всего повлияло</h2>
+    <p class="muted">«Забыть» — волна перестанет на это опираться, лайк останется.</p>
     <div class="tracks infl">
       ${profile.influences.map((i) => `
         <div class="track">
@@ -870,11 +853,19 @@ async function renderTaste() {
       renderTaste();
     }
   };
-  $('#t-private').onchange = async (e) => {
-    await api('/api/wave/settings', { method: 'PUT', body: { private_mode: e.target.checked } });
-    if (state.settings) state.settings.private_mode = e.target.checked ? 1 : 0;
-    toast(e.target.checked ? 'Режим «не запоминать» включён' : 'Волна снова учится');
+  const setting = (id, key, on, off) => {
+    $(id).onchange = async (e) => {
+      const v = e.target.checked ? 1 : 0;
+      await api('/api/wave/settings', { method: 'PUT', body: { [key]: Boolean(v) } }).catch((er) => toast(er.message));
+      if (state.settings) state.settings[key] = v;
+      if (key !== 'private_mode' && state.mode === 'wave') state.queue = [];
+      state.profile = null;
+      toast(v ? on : off);
+    };
   };
+  setting('#t-private', 'private_mode', 'Режим «не запоминать» включён', 'Волна снова учится');
+  setting('#t-context', 'context', 'Волна учитывает время суток', 'Время суток не учитывается');
+  setting('#t-explicit', 'hide_explicit', 'Треки 18+ скрыты', 'Треки 18+ снова показываются');
 }
 
 const localHourNow = () => new Date().getHours();
