@@ -1,5 +1,6 @@
 // NEYAMI — клиент. Без фреймворков: hash-роутинг, один <audio>, состояние в модуле.
 import { extractFeatures } from './audio-features.js';
+import { icon, hydrateIcons } from './icons.js';
 
 // Часовой пояс — для «волны по контексту» (утро/вечер/выходные считаются по местному времени)
 const TZ = new Date().getTimezoneOffset();
@@ -132,7 +133,7 @@ function playTrack(item, { startAt = 0, preview = false } = {}) {
     }, { once: true });
   }
   audio.play().catch(() => {
-    $('#p-toggle').textContent = '▶'; // браузер не дал запустить звук сам — ждём нажатия ▶
+    setToggle(false); // браузер не дал запустить звук сам — ждём нажатия ▶
   });
   if (!preview) sendEvent('play');
   renderPlayer();
@@ -215,12 +216,12 @@ audio.addEventListener('playing', () => {
   if (c && c.segStart == null) c.segStart = c.lastT = audio.currentTime;
   // если старт с дропа прошёл без события перемотки — следующая перемотка уже от человека
   if (c && c.programmaticSeek && !audio.seeking) c.programmaticSeek = false;
-  $('#p-toggle').textContent = '⏸';
+  setToggle(true);
   $('.wave-btn')?.classList.add('playing');
 });
 audio.addEventListener('pause', () => {
   closeSegment();
-  $('#p-toggle').textContent = '▶';
+  setToggle(false);
   $('.wave-btn')?.classList.remove('playing');
 });
 audio.addEventListener('timeupdate', () => {
@@ -260,7 +261,7 @@ async function next({ refresh = false } = {}) {
   if (!item) {
     audio.pause();
     state.cur = null;
-    toast(state.mode === 'bridge' ? 'Мост пройден 🌉' : 'Очередь закончилась');
+    toast(state.mode === 'bridge' ? 'Мост пройден' : 'Очередь закончилась');
     renderPlayer();
     return;
   }
@@ -293,6 +294,10 @@ async function startWave() {
 }
 
 // ---------- плеер: UI ----------
+function setToggle(playing) {
+  $('#p-toggle').innerHTML = icon(playing ? 'pause' : 'play', 20);
+  $('#p-toggle').title = playing ? 'Пауза' : 'Играть';
+}
 function renderPlayer() {
   const c = state.cur;
   $('#player').classList.toggle('hidden', !c);
@@ -300,7 +305,7 @@ function renderPlayer() {
   const t = c.track;
   $('#p-title').innerHTML = `${esc(t.title)} ${t.explicit ? '<span class="badge">18+</span>' : ''}`;
   $('#p-artist').innerHTML = `<a href="#/u/${encodeURIComponent(t.artist.username)}">${esc(t.artist.username)}</a>`;
-  $('#p-like').textContent = t.my_reaction > 0 ? '♥' : '♡';
+  $('#p-like').innerHTML = icon(t.my_reaction > 0 ? 'heartFill' : 'heart');
   $('#p-like').classList.toggle('active', t.my_reaction > 0);
   $('#p-reasons').textContent = c.reasons.length ? 'Почему этот трек: ' + c.reasons.join(' · ') : '';
   $('#p-drop').title = `К лучшему моменту (${fmt(t.moment.start)})`;
@@ -359,22 +364,33 @@ function drawHeat(canvas, heat, moment, duration) {
   const w = (canvas.width = canvas.clientWidth * devicePixelRatio);
   const h = (canvas.height = canvas.clientHeight * devicePixelRatio);
   ctx.clearRect(0, 0, w, h);
+  const css = getComputedStyle(document.documentElement);
+  const accent = css.getPropertyValue('--accent').trim() || '#c96442';
+  const faint = css.getPropertyValue('--faint').trim() || '#a9a69c';
   const max = Math.max(1, ...heat.heard);
   const bw = w / heat.heard.length;
+  ctx.globalAlpha = 0.45;
+  ctx.fillStyle = faint;
   heat.heard.forEach((v, i) => {
     const bh = Math.max(1, (v / max) * h);
-    ctx.fillStyle = 'rgba(255,154,60,.45)';
     ctx.fillRect(i * bw, h - bh, Math.max(1, bw - 1), bh);
   });
   if (duration > 0) {
-    // лучший момент: лёгкая подсветка + яркая метка начала
+    // лучший момент: участок акцентным цветом + метка начала
     const x0 = (moment.start / duration) * w;
     const x1 = (moment.end / duration) * w;
-    ctx.fillStyle = 'rgba(255,90,54,.15)';
-    ctx.fillRect(x0, 0, x1 - x0, h);
-    ctx.fillStyle = '#ff5a36';
-    ctx.fillRect(x0, 0, 2 * devicePixelRatio, h);
+    ctx.globalAlpha = 0.35;
+    ctx.fillStyle = accent;
+    heat.heard.forEach((v, i) => {
+      const x = i * bw;
+      if (x + bw < x0 || x > x1) return;
+      const bh = Math.max(1, (v / max) * h);
+      ctx.fillRect(x, h - bh, Math.max(1, bw - 1), bh);
+    });
+    ctx.globalAlpha = 1;
+    ctx.fillRect(x0, 0, 1.5 * devicePixelRatio, h);
   }
+  ctx.globalAlpha = 1;
 }
 
 async function react(track, value) {
@@ -394,31 +410,34 @@ function trackRow(item, idx) {
   const t = item.track;
   const isMine = state.me && state.me.id === t.artist.id;
   const now = state.cur?.track.id === t.id;
+  const liked = t.my_reaction > 0;
   return `
   <div class="track ${now ? 'now' : ''}" data-idx="${idx}">
-    <button class="play" data-act="play" title="Играть">▶</button>
+    <button class="play" data-act="play" title="Играть">${icon('play', 16)}</button>
     <div class="meta">
       <div class="title">${esc(t.title)} ${t.explicit ? '<span class="badge">18+</span>' : ''}</div>
       <div class="sub">
         <a href="#/u/${encodeURIComponent(t.artist.username)}">${esc(t.artist.username)}</a>
         <span>${fmt(t.duration)}</span>
         ${t.features?.bpm ? `<span title="Темп, определён анализом звука">${t.features.bpm} BPM</span>` : ''}
-        <span>♥ ${t.likes}</span><span>▶ ${t.plays}</span>
+        <span class="stat" title="Лайки">${icon('heart', 12)}${t.likes}</span>
         ${t.tags.map((g) => `<a class="chip tag" href="#/tag/${encodeURIComponent(g)}">#${esc(g)}</a>`).join('')}
       </div>
       ${item.reasons?.length ? `<div class="why">${item.reasons.map(esc).join(' · ')}</div>` : ''}
     </div>
     <div class="actions">
-      <button data-act="drop" class="opt" title="Слушать с лучшего момента (${fmt(t.moment.start)})">⤓ дроп</button>
-      <button data-act="like" class="${t.my_reaction > 0 ? 'active' : ''}" title="Нравится">${t.my_reaction > 0 ? '♥' : '♡'}</button>
-      ${isMine ? '<button data-act="delete" class="opt" title="Удалить">🗑</button>' : '<button data-act="report" class="opt" title="Пожаловаться на нарушение закона">⚑</button>'}
+      <button data-act="drop" class="icon-btn opt" title="С лучшего момента (${fmt(t.moment.start)})">${icon('target')}</button>
+      <button data-act="like" class="icon-btn ${liked ? 'active' : ''}" title="Нравится">${icon(liked ? 'heartFill' : 'heart')}</button>
+      ${isMine
+        ? `<button data-act="delete" class="icon-btn opt" title="Удалить">${icon('trash')}</button>`
+        : `<button data-act="report" class="icon-btn opt" title="Пожаловаться на нарушение закона">${icon('flag')}</button>`}
     </div>
   </div>`;
 }
 
 function renderTrackList(container, items, { mode = 'list' } = {}) {
   if (!items.length) {
-    container.innerHTML = '<p class="muted">Пока пусто.</p>';
+    container.innerHTML = '<p class="empty">Пока пусто.</p>';
     return;
   }
   container.innerHTML = `<div class="tracks">${items.map(trackRow).join('')}</div>`;
@@ -506,56 +525,54 @@ async function renderList(title, url) {
 async function renderWave() {
   if (!state.me) {
     view.innerHTML = `
-      <div class="card">
-        <h1>Волна, которая слушает вас</h1>
-        <p>NEYAMI учится на том, что вы дослушиваете и пропускаете, объясняет каждую рекомендацию
-        и даёт вам ручки управления. Никаких скрытых «продвигаемых» треков.</p>
-        <p><a href="#/login"><button class="primary">Войти или зарегистрироваться</button></a></p>
-      </div>`;
+      <section class="hero">
+        <h1>Музыка без цензуры и волна, которая вас слышит</h1>
+        <p class="lead">NEYAMI учится на том, что вы дослушиваете и пропускаете, слышит звучание треков,
+        учитывает время суток и объясняет каждую рекомендацию. Никаких скрытых «продвигаемых» треков.</p>
+        <a href="#/login"><button class="primary wave-btn">Войти или создать аккаунт</button></a>
+      </section>`;
     return;
   }
   if (!state.settings) state.settings = (await api('/api/wave/settings')).settings;
   const s = state.settings;
   const { tags } = await api('/api/tags');
+  const sw = (id, on, text, hint = '') =>
+    `<label class="switch" title="${hint}"><input type="checkbox" id="${id}" ${on ? 'checked' : ''}><span>${text}</span></label>`;
   view.innerHTML = `
-    <div class="wave-hero">
-      <button class="wave-btn ${!audio.paused && state.mode === 'wave' ? 'playing' : ''}" id="wave-start">
-        ${state.mode === 'wave' ? 'Волна ↻' : 'Моя волна'}
+    <section class="hero">
+      <h1>Моя волна</h1>
+      <p class="lead">Учится на том, что вы дослушиваете и пропускаете, и объясняет каждый трек.</p>
+      <button class="primary wave-btn" id="wave-start">
+        ${icon(state.mode === 'wave' ? 'rotate' : 'play', 18)}<span>${state.mode === 'wave' ? 'Перезапустить волну' : 'Слушать'}</span>
       </button>
-      <div>
-        <div class="slider">
-          <div class="labels"><span>Любимое</span><b>Настрой волны</b><span>Новое</span></div>
-          <input type="range" id="discovery" min="0" max="100" value="${Math.round(s.discovery * 100)}">
-        </div>
-        <div class="slider">
-          <div class="labels"><span>Популярное</span><span></span><span>Андеграунд</span></div>
-          <input type="range" id="underground" min="0" max="100" value="${Math.round(s.underground * 100)}">
-        </div>
-        <div class="row-opts">
-          <label><input type="checkbox" id="hide-explicit" ${s.hide_explicit ? 'checked' : ''}> Скрывать 18+</label>
-          <label title="Прослушивания не будут влиять на волну — удобно, если включает гость или ребёнок">
-            <input type="checkbox" id="private-mode" ${s.private_mode ? 'checked' : ''}> 🕶 Не запоминать
-          </label>
-          <label title="Утром, ночью и в выходные вкус разный — волна учитывает время">
-            <input type="checkbox" id="context-mode" ${s.context !== 0 ? 'checked' : ''}> 🕐 Учитывать время
-          </label>
-          <a href="#/quick"><button>⚡ Быстрый поиск</button></a>
-        </div>
-        <div id="context-line" class="muted ctx-line"></div>
-        <div style="margin-top:12px"><span class="muted">Ваш вкус: </span><span id="profile-chips" class="chips"></span>
-          <a href="#/taste" class="muted"> — настроить</a></div>
-      </div>
-    </div>
+      <div id="context-line" class="ctx-line"></div>
+    </section>
 
-    <h2>🌉 Волна-мост</h2>
+    <section class="card settings">
+      <div class="slider">
+        <div class="labels"><span>Любимое</span><b>Настрой</b><span>Новое</span></div>
+        <input type="range" id="discovery" min="0" max="100" value="${Math.round(s.discovery * 100)}" aria-label="Любимое или новое">
+      </div>
+      <div class="slider">
+        <div class="labels"><span>Популярное</span><span></span><span>Андеграунд</span></div>
+        <input type="range" id="underground" min="0" max="100" value="${Math.round(s.underground * 100)}" aria-label="Популярное или андеграунд">
+      </div>
+      <div class="row-opts">
+        ${sw('hide-explicit', s.hide_explicit, 'Скрывать 18+')}
+        ${sw('private-mode', s.private_mode, 'Не запоминать', 'Прослушивания не будут влиять на волну — удобно, если включает гость или ребёнок')}
+        ${sw('context-mode', s.context !== 0, 'Учитывать время суток', 'Утром, ночью и в выходные вкус разный — волна это учитывает')}
+      </div>
+    </section>
+
+    <h2>Волна-мост</h2>
     <div class="card bridge">
-      <p class="muted" style="margin-top:0">Плавный переход от одного настроения к другому — для тренировки, вечеринки или засыпания.</p>
+      <p class="muted" style="margin-top:0">Плавный переход от одного настроения к другому — по тегам и по звучанию.</p>
       <div class="row">
         <input type="text" id="b-from" list="tags" placeholder="откуда, напр. lofi" value="${esc(state.bridge?.from ?? '')}">
-        <span>→</span>
+        <span class="muted">→</span>
         <input type="text" id="b-to" list="tags" placeholder="куда, напр. dnb" value="${esc(state.bridge?.to ?? '')}">
-        <select id="b-len">${[5, 8, 12, 20].map((n) => `<option ${n === (state.bridge?.length ?? 8) ? 'selected' : ''}>${n}</option>`).join('')}</select>
-        <button id="b-go" class="primary">Построить</button>
+        <select id="b-len" aria-label="Длина моста">${[5, 8, 12, 20].map((n) => `<option ${n === (state.bridge?.length ?? 8) ? 'selected' : ''}>${n}</option>`).join('')}</select>
+        <button id="b-go">Построить</button>
       </div>
       <datalist id="tags">${tags.map((t) => `<option value="${esc(t.tag)}">${t.count}</option>`).join('')}</datalist>
     </div>
@@ -578,11 +595,11 @@ async function renderWave() {
   $('#hide-explicit').onchange = (e) => save({ hide_explicit: e.target.checked });
   $('#private-mode').onchange = (e) => {
     save({ private_mode: e.target.checked });
-    toast(e.target.checked ? 'Режим «не запоминать» включён 🕶' : 'Волна снова учится на ваших прослушиваниях');
+    toast(e.target.checked ? 'Режим «не запоминать» включён' : 'Волна снова учится на ваших прослушиваниях');
   };
   $('#context-mode').onchange = (e) => {
     save({ context: e.target.checked });
-    toast(e.target.checked ? 'Волна учитывает время суток 🕐' : 'Время суток больше не учитывается');
+    toast(e.target.checked ? 'Волна учитывает время суток' : 'Время суток больше не учитывается');
   };
   $('#b-go').onclick = startBridge;
   renderQueue();
@@ -592,22 +609,20 @@ async function renderWave() {
 }
 
 function renderProfileChips() {
-  const el = $('#profile-chips');
-  if (!el || !state.profile) return;
-  const p = state.profile;
-  el.innerHTML = p.topTags.length
-    ? p.topTags.slice(0, 6).map(([t]) => `<span class="chip pos">#${esc(t)}</span>`).join('')
-    : '<span class="muted">пока не знаю — включите волну и оценивайте треки</span>';
   const line = $('#context-line');
-  if (!line) return;
+  if (!line || !state.profile) return;
+  const p = state.profile;
   const c = p.context;
   const lines = [];
-  if (p.sound) lines.push(`🔊 Ваш звук: ${esc(p.sound.text)}`);
+  lines.push(p.topTags.length
+    ? `Ваш вкус: ${p.topTags.slice(0, 5).map(([t]) => `<span class="chip pos">#${esc(t)}</span>`).join(' ')} <a href="#/taste">настроить</a>`
+    : 'Волна пока вас не знает — слушайте и оценивайте треки');
+  if (p.sound) lines.push(`Ваш звук: ${esc(p.sound.text)}`);
   if (state.settings?.context !== 0 && c) {
     const when = `${c.slot}${c.weekend ? ' в выходные' : ' в будни'}`;
     lines.push(c.confidence >= 0.3 && c.topTags.length
-      ? `🕐 Сейчас — как обычно ${when}: ${c.topTags.slice(0, 3).map(([t]) => '#' + esc(t)).join(' ')}${c.sound ? ` · ${esc(c.sound)}` : ''}`
-      : `🕐 Пока мало слушали ${when} — волна подстроится под это время`);
+      ? `Сейчас — как обычно ${when}: ${c.topTags.slice(0, 3).map(([t]) => '#' + esc(t)).join(' ')}${c.sound ? ` · ${esc(c.sound)}` : ''}`
+      : `Пока мало слушали ${when} — волна подстроится под это время`);
   }
   line.innerHTML = lines.join('<br>');
 }
@@ -661,12 +676,11 @@ function stopPreview() {
 async function renderQuick() {
   if (!requireLogin()) return;
   view.innerHTML = `
-    <h1>⚡ Быстрый поиск</h1>
-    <p class="muted">Каждый трек звучит ${PREVIEW_SEC} секунд с самого сильного момента — его NEYAMI определяет сама по тому,
-    что люди слушают и куда перематывают. Оценивайте — волна учится в разы быстрее.</p>
+    <h1>Быстрый поиск</h1>
+    <p class="lead">${PREVIEW_SEC} секунд с самого сильного момента каждого трека. Оценивайте — волна учится в разы быстрее.</p>
     <div class="card quick" id="quick"><p class="muted">Подбираю…</p></div>
-    <p class="muted keys">← не моё · → нравится · пробел — пауза · ↓ слушать целиком</p>
-    <p class="muted keys touch-only">Свайп вправо — нравится, влево — не моё</p>`;
+    <p class="keys">← не моё · → нравится · пробел — пауза · ↓ слушать целиком</p>
+    <p class="keys touch-only">Свайп вправо — нравится, влево — не моё</p>`;
   document.addEventListener('keydown', previewKeys);
   preview.items = [];
   await previewNext();
@@ -692,7 +706,7 @@ async function previewNext(outcome) {
   const box = $('#quick');
   if (!box) return;
   if (!item) {
-    box.innerHTML = '<p>Вы прослушали всё, что есть 🎉 Загляните позже или <a href="#/upload">загрузите своё</a>.</p>';
+    box.innerHTML = '<p>Вы прослушали всё, что есть. Загляните позже или <a href="#/upload">загрузите своё</a>.</p>';
     return;
   }
   state.mode = 'preview';
@@ -700,14 +714,14 @@ async function previewNext(outcome) {
   box.innerHTML = `
     <div class="q-title">${esc(t.title)} ${t.explicit ? '<span class="badge">18+</span>' : ''}</div>
     <div class="q-artist"><a href="#/u/${encodeURIComponent(t.artist.username)}">${esc(t.artist.username)}</a></div>
-    <div class="chips" style="justify-content:center;margin:10px 0">${t.tags.map((g) => `<span class="chip">#${esc(g)}</span>`).join('')}</div>
+    <div class="chips">${t.tags.map((g) => `<span class="chip">#${esc(g)}</span>`).join('')}${t.features?.bpm ? `<span class="chip">${t.features.bpm} BPM</span>` : ''}</div>
     <div class="why">${item.reasons.map(esc).join(' · ')}</div>
-    <div class="muted q-moment">с ${fmt(t.moment.start)} · ${{ listeners: 'дроп определён слушателями', audio: 'дроп по анализу звука', default: 'пока мало данных' }[t.moment.source]}</div>
+    <div class="q-moment">с ${fmt(t.moment.start)} · ${{ listeners: 'лучший момент определили слушатели', audio: 'лучший момент — по анализу звука', default: 'пока мало данных' }[t.moment.source]}</div>
     <div class="progress"><div id="q-bar"></div></div>
     <div class="q-actions">
-      <button data-q="no" title="Не моё (←)">👎 Не моё</button>
-      <button data-q="full" title="Слушать целиком (↓)">🎧 Целиком</button>
-      <button data-q="yes" class="primary" title="Нравится (→)">♥ Нравится</button>
+      <button data-q="no" title="Не моё (←)">${icon('dislike')}Не моё</button>
+      <button data-q="full" title="Слушать целиком (↓)">${icon('headphones')}Целиком</button>
+      <button data-q="yes" class="primary" title="Нравится (→)">${icon('heart')}Нравится</button>
     </div>`;
   box.onclick = (e) => {
     const b = e.target.closest('button[data-q]');
@@ -744,7 +758,7 @@ async function previewAction(act) {
   if (act === 'no') previewNext('preview_skip');
   else if (act === 'yes') {
     await react(item.track, 1);
-    toast('♥ Добавлено в «Мне нравится»');
+    toast('Добавлено в «Мне нравится»');
     previewNext('preview_complete');
   } else if (act === 'full') {
     clearInterval(preview.timer);
@@ -772,14 +786,14 @@ async function renderTaste() {
   const pct = Math.round(profile.confidence * 100);
   view.innerHTML = `
     <h1>Мой вкус</h1>
-    <p class="muted">Это всё, что волна знает о вас. Никаких скрытых данных — и всё можно поправить.</p>
+    <p class="lead">Всё, что волна знает о вас. Никаких скрытых данных — и всё можно поправить.</p>
 
     <div class="card">
       <div class="row" style="justify-content:space-between">
         <div>Насколько волна вас знает: <b>${pct}%</b></div>
-        <label><input type="checkbox" id="t-private" ${settings.private_mode ? 'checked' : ''}> 🕶 Не запоминать прослушивания</label>
+        <label class="switch"><input type="checkbox" id="t-private" ${settings.private_mode ? 'checked' : ''}><span>Не запоминать прослушивания</span></label>
       </div>
-      <div class="progress" style="margin-top:8px"><div style="width:${pct}%"></div></div>
+      <div class="progress" style="margin-top:12px"><div style="width:${pct}%"></div></div>
     </div>
 
     ${profile.sound ? `<h2>Ваш звук</h2>
@@ -796,7 +810,7 @@ async function renderTaste() {
     <div class="slots">
       ${profile.bySlot.map((sl) => `
         <div class="slot card ${sl.hour === Math.floor(localHourNow() / 6) * 6 + 3 && sl.weekend === isWeekendNow() ? 'now' : ''}">
-          <div class="slot-title">${{ 3: '🌙 Ночь', 9: '🌅 Утро', 15: '☀️ День', 21: '🌆 Вечер' }[sl.hour]} <span class="muted">· ${sl.weekend ? 'выходные' : 'будни'}</span></div>
+          <div class="slot-title">${{ 3: 'Ночь', 9: 'Утро', 15: 'День', 21: 'Вечер' }[sl.hour]} <span class="muted">· ${sl.weekend ? 'выходные' : 'будни'}</span></div>
           ${sl.confidence < 0.2 || !sl.topTags.length
             ? '<div class="muted">мало данных</div>'
             : `<div class="chips">${sl.topTags.map(([t]) => `<span class="chip pos">#${esc(t)}</span>`).join('')}</div>
@@ -819,18 +833,18 @@ async function renderTaste() {
       </div>
       <div class="chips" style="margin-top:12px">
         ${overrides.map((o) => `<span class="chip ${o.action === 'block' ? 'neg' : 'pos'}">#${esc(o.tag)} — ${actLabel[o.action]}
-          <a href="#" data-undo="${esc(o.tag)}" title="Отменить">✕</a></span>`).join('') || '<span class="muted">Нет правок.</span>'}
+          <a href="#" data-undo="${esc(o.tag)}" title="Отменить">${icon('x', 14)}</a></span>`).join('') || '<span class="muted">Нет правок.</span>'}
       </div>
     </div>
 
     <h2>Что сильнее всего повлияло на волну</h2>
-    <p class="muted">Включили что-то случайно? «Забыть» — и волна перестанет на это опираться.</p>
-    <div class="tracks">
+    <p class="muted">Включили что-то случайно? «Забыть» — и волна перестанет на это опираться. Лайк при этом останется.</p>
+    <div class="tracks infl">
       ${profile.influences.map((i) => `
         <div class="track">
           <span class="chip ${i.weight > 0 ? 'pos' : 'neg'}">${i.weight > 0 ? '+' : ''}${i.weight}</span>
           <div class="meta"><div class="title">${esc(i.track.title)}</div><div class="sub">${esc(i.track.artist.username)}</div></div>
-          <div class="actions"><button data-forget="${i.track_id}">Забыть</button></div>
+          <div class="actions"><button class="ghost" data-forget="${i.track_id}">Забыть</button></div>
         </div>`).join('') || '<p class="muted">Пока ничего.</p>'}
     </div>`;
 
@@ -859,7 +873,7 @@ async function renderTaste() {
   $('#t-private').onchange = async (e) => {
     await api('/api/wave/settings', { method: 'PUT', body: { private_mode: e.target.checked } });
     if (state.settings) state.settings.private_mode = e.target.checked ? 1 : 0;
-    toast(e.target.checked ? 'Режим «не запоминать» включён 🕶' : 'Волна снова учится');
+    toast(e.target.checked ? 'Режим «не запоминать» включён' : 'Волна снова учится');
   };
 }
 
@@ -872,9 +886,9 @@ function tasteTag(tag, v) {
       <a href="#/tag/${encodeURIComponent(tag)}">#${esc(tag)}</a>
       <div class="meter"><div class="${v >= 0 ? 'pos' : 'neg'}" style="width:${Math.round(Math.abs(v) * 100)}%"></div></div>
       <span class="ops">
-        <button data-tag="${esc(tag)}" data-tag-act="boost" title="Хочу больше">＋</button>
-        <button data-tag="${esc(tag)}" data-tag-act="forget" title="Забыть — не учитывать в волне">↺</button>
-        <button data-tag="${esc(tag)}" data-tag-act="block" title="Не предлагать вообще">⊘</button>
+        <button data-tag="${esc(tag)}" data-tag-act="boost" title="Хочу больше">${icon('plus', 16)}</button>
+        <button data-tag="${esc(tag)}" data-tag-act="forget" title="Забыть — не учитывать в волне">${icon('rotate', 16)}</button>
+        <button data-tag="${esc(tag)}" data-tag-act="block" title="Не предлагать вообще">${icon('ban', 16)}</button>
       </span>
     </div>`;
 }
@@ -885,7 +899,7 @@ async function renderProfile(name) {
   const isMe = state.me?.id === user.id;
   view.innerHTML = `
     <h1>${esc(user.username)}</h1>
-    <p class="muted">${user.followers} подписчиков · ${tracks.length} треков</p>
+    <p class="lead">${user.followers} подписчиков · ${tracks.length} треков${user.bio ? ` · ${esc(user.bio)}` : ''}</p>
     ${!isMe && state.me ? `<button id="follow" class="${user.following ? '' : 'primary'}">${user.following ? 'Вы подписаны' : 'Подписаться'}</button>` : ''}
     <h2>Треки</h2><div id="list"></div>`;
   renderTrackList($('#list'), tracks.map((track) => ({ track })));
@@ -931,13 +945,13 @@ function renderUpload() {
   if (!requireLogin()) return;
   view.innerHTML = `
     <h1>Загрузить трек</h1>
-    <p class="muted">Без премодерации и скрытых понижений в выдаче. Удаляем только то, что нарушает закон или чужие права.</p>
+    <p class="lead">Без премодерации и скрытых понижений в выдаче. Удаляем только то, что нарушает закон или чужие права.</p>
     <form class="form card" id="up">
       <label>Аудиофайл (mp3, ogg, opus, wav, flac, m4a — до 100 МБ)<input type="file" name="file" accept="audio/*" required></label>
       <label>Название<input type="text" name="title" maxlength="200" required></label>
       <label>Теги — через запятую или пробел (жанр, настроение, темп)<input type="text" name="tags" placeholder="lofi, ночь, chill"></label>
       <label>Описание<textarea name="description" rows="3" maxlength="5000"></textarea></label>
-      <label class="row"><input type="checkbox" name="explicit"> Отметка 18+ (слушатели сами решают, скрывать ли такое)</label>
+      <label class="switch"><input type="checkbox" name="explicit"><span>Отметка 18+ — слушатели сами решают, скрывать ли такое</span></label>
       <div class="progress"><div id="up-bar"></div></div>
       <div class="muted" id="up-status"></div>
       <button class="primary">Опубликовать</button>
@@ -970,7 +984,7 @@ function renderUpload() {
     xhr.onload = () => {
       const data = JSON.parse(xhr.responseText || '{}');
       if (xhr.status >= 300) { status.textContent = data.error || 'Ошибка загрузки'; return; }
-      toast('Опубликовано 🎉');
+      toast('Опубликовано');
       location.hash = `#/u/${encodeURIComponent(state.me.username)}`;
     };
     xhr.onerror = () => { status.textContent = 'Сеть недоступна'; };
@@ -981,7 +995,9 @@ function renderUpload() {
 // ---------- Вход ----------
 function renderLogin() {
   view.innerHTML = `
-    <h1>Вход</h1>
+    <div class="auth">
+    <h1>Добро пожаловать</h1>
+    <p class="lead">Войдите или создайте аккаунт — это займёт секунду.</p>
     <form class="form card" id="auth">
       <label>Имя<input type="text" name="username" autocomplete="username" required></label>
       <label>Пароль<input type="password" name="password" autocomplete="current-password" required minlength="8"></label>
@@ -990,7 +1006,8 @@ function renderLogin() {
         <button data-mode="register">Создать аккаунт</button>
       </div>
       <div class="muted" id="auth-err"></div>
-    </form>`;
+    </form>
+    </div>`;
   $('#auth').onsubmit = async (e) => {
     e.preventDefault();
     const mode = e.submitter?.dataset.mode ?? 'login';
@@ -1009,12 +1026,12 @@ function renderLogin() {
 function renderAccount() {
   const el = $('#account');
   if (!state.me) {
-    el.innerHTML = '<a href="#/login"><button>Войти</button></a>';
+    el.innerHTML = '<a href="#/login"><button class="primary">Войти</button></a>';
     return;
   }
-  el.innerHTML = `<a href="#/taste" title="Мой вкус">🧭</a>
-    <a href="#/u/${encodeURIComponent(state.me.username)}">${esc(state.me.username)}</a>
-    <button id="logout">Выйти</button>`;
+  el.innerHTML = `<a class="who" href="#/u/${encodeURIComponent(state.me.username)}" title="Мой профиль">
+      <span class="avatar">${esc(state.me.username.slice(0, 1).toUpperCase())}</span><span>${esc(state.me.username)}</span></a>
+    <button id="logout" class="icon-btn" title="Выйти">${icon('logout')}</button>`;
   $('#logout').onclick = async () => {
     leaveCurrent(); // сначала отправляем итог прослушивания, пока сессия ещё жива
     audio.pause();
@@ -1071,4 +1088,5 @@ async function boot() {
   router();
 }
 window.addEventListener('online', boot);
+hydrateIcons();
 boot();
