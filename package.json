@@ -1,7 +1,7 @@
 {
   "name": "neyami",
   "productName": "NEYAMI",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "NEYAMI — свободный музыкальный сервис с честной и управляемой волной рекомендаций",
   "type": "module",
