@@ -165,7 +165,7 @@ test('мост по звуку проходит через трек без те�
   const mid = { id: 7, user_id: 16, artist: 'g', title: 'Середина', tags: [], explicit: false, created_at: NOW - 30 * DAY,
     features: { bpm: 115, energy: 0.55, percussive: 0.55, brightness: 0.5, dynamics: 0.45 } };
   const { items, path } = bridge({ userId: 99, tracks: [...sonic, mid], now: NOW, rng, from: 'lofi', to: 'dnb', length: 5 });
-  assert.ok(path.from.includes('BPM') && path.to.includes('BPM'));
+  assert.ok(path.from.includes('неспешно') && path.to.includes('быстро'), JSON.stringify(path));
   const ids = items.map((i) => i.track.id);
   assert.ok([1, 5].includes(ids[0]) && [2, 6].includes(ids.at(-1)), ids.join());
   const energy = items.map((i) => i.track.features.energy);

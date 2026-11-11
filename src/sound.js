@@ -68,15 +68,24 @@ export function lerpSound(a, b, t) {
   return out;
 }
 
-/** Короткое человеческое описание звучания. */
+/** Темп обычными словами. */
+export function tempoWord(bpm) {
+  if (!bpm) return '';
+  if (bpm < 85) return 'неспешно';
+  if (bpm < 110) return 'размеренно';
+  if (bpm < 135) return 'бодро';
+  return 'быстро';
+}
+
+/** Короткое человеческое описание звучания — без терминов. */
 export function describeSound(f) {
   if (!f) return '';
   const parts = [];
-  if (f.bpm) parts.push(`~${f.bpm} BPM`);
+  if (f.bpm) parts.push(tempoWord(f.bpm));
   parts.push(f.energy > 0.62 ? 'энергично' : f.energy < 0.38 ? 'спокойно' : 'ровно');
-  if (f.percussive > 0.65) parts.push('плотный ритм');
-  else if (f.percussive < 0.3) parts.push('мягко, без резких ударов');
+  if (f.percussive > 0.65) parts.push('с плотным ритмом');
+  else if (f.percussive < 0.3) parts.push('мягко');
   if (f.brightness > 0.6) parts.push('ярко');
-  else if (f.brightness < 0.25) parts.push('глубоко, тёпло');
+  else if (f.brightness < 0.25) parts.push('тепло');
   return parts.join(', ');
 }

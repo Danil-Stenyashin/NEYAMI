@@ -1,8 +1,8 @@
 // Service worker NEYAMI: оболочка приложения работает без сети, музыка и API — всегда из сети.
 // Стратегия «сначала сеть»: обновления видны сразу, кэш — только запасной вариант.
-const CACHE = 'neyami-shell-v1';
+const CACHE = 'neyami-shell-v2';
 const SHELL = [
-  '/', '/app.js', '/style.css', '/audio-features.js', '/manifest.webmanifest',
+  '/', '/app.js', '/style.css', '/audio-features.js', '/icons.js', '/eq.js', '/id3.js', '/manifest.webmanifest',
   '/icons/icon.svg', '/icons/icon-192.png', '/icons/icon-512.png', '/icons/apple-touch-icon.png',
 ];
 

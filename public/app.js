@@ -1,6 +1,18 @@
 // NEYAMI — клиент. Без фреймворков: hash-роутинг, один <audio>, состояние в модуле.
 import { extractFeatures } from './audio-features.js';
 import { icon, hydrateIcons } from './icons.js';
+import { BANDS, PRESETS, loadEq, saveEq, ensureGraph, applyEq, graphReady, levels, isIOS } from './eq.js';
+import { readId3, guessFromFilename } from './id3.js';
+
+// Темп и приветствие — обычными словами
+const tempoWord = (bpm) => (!bpm ? '' : bpm < 85 ? 'неспешно' : bpm < 110 ? 'размеренно' : bpm < 135 ? 'бодро' : 'быстро');
+function greeting() {
+  const h = new Date().getHours();
+  if (h >= 5 && h < 12) return 'Доброе утро';
+  if (h >= 12 && h < 18) return 'Добрый день';
+  if (h >= 18 && h < 23) return 'Добрый вечер';
+  return 'Доброй ночи';
+}
 
 // Часовой пояс — для «волны по контексту» (утро/вечер/выходные считаются по местному времени)
 const TZ = new Date().getTimezoneOffset();
@@ -163,6 +175,9 @@ function silentWav() {
 function unlockAudio() {
   if (unlocked) return;
   unlocked = true;
+  // эквалайзер, включённый в прошлый раз, оживает от первого касания (без жеста браузер не даст звук)
+  const eqState = loadEq();
+  if (eqState.on && ensureGraph(audio)) applyEq(eqState);
   if (audio.src) return; // уже что-то играет — значит, разблокирован
   silentUrl = silentWav();
   unlocking = true;
@@ -182,7 +197,7 @@ function updateMediaSession(track) {
       artist: track.artist.username,
       album: 'NEYAMI',
       artwork: [
-        { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png' },
+        { src: new URL(track.cover, location.href).href, sizes: '400x400' },
         { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png' },
       ],
     });
@@ -261,7 +276,7 @@ async function next({ refresh = false } = {}) {
   if (!item) {
     audio.pause();
     state.cur = null;
-    toast(state.mode === 'bridge' ? 'Мост пройден' : 'Очередь закончилась');
+    toast(state.mode === 'bridge' ? 'Переход завершён' : 'Музыка в очереди закончилась');
     renderPlayer();
     return;
   }
@@ -303,12 +318,14 @@ function renderPlayer() {
   $('#player').classList.toggle('hidden', !c);
   if (!c) return;
   const t = c.track;
+  $('#p-cover').src = t.cover;
   $('#p-title').innerHTML = `${esc(t.title)} ${t.explicit ? '<span class="badge">18+</span>' : ''}`;
   $('#p-artist').innerHTML = `<a href="#/u/${encodeURIComponent(t.artist.username)}">${esc(t.artist.username)}</a>`;
   $('#p-like').innerHTML = icon(t.my_reaction > 0 ? 'heartFill' : 'heart');
   $('#p-like').classList.toggle('active', t.my_reaction > 0);
   $('#p-reasons').textContent = c.reasons.length ? 'Почему этот трек: ' + c.reasons.join(' · ') : '';
   $('#p-drop').title = `К лучшему моменту (${fmt(t.moment.start)})`;
+  if (!$('#full').classList.contains('hidden')) renderFull();
 }
 
 function updateProgress() {
@@ -316,6 +333,11 @@ function updateProgress() {
   $('#p-time').textContent = fmt(audio.currentTime);
   $('#p-dur').textContent = fmt(d);
   if (d > 0 && !seekDragging) $('#p-seek').value = Math.round((audio.currentTime / d) * 1000);
+  if (!$('#full').classList.contains('hidden')) {
+    $('#full-time').textContent = fmt(audio.currentTime);
+    $('#full-dur').textContent = fmt(d);
+    if (d > 0 && document.activeElement !== $('#full-range')) $('#full-range').value = Math.round((audio.currentTime / d) * 1000);
+  }
 }
 
 let seekDragging = false;
@@ -413,13 +435,12 @@ function trackRow(item, idx) {
   const liked = t.my_reaction > 0;
   return `
   <div class="track ${now ? 'now' : ''}" data-idx="${idx}">
-    <button class="play" data-act="play" title="Играть">${icon('play', 16)}</button>
+    <button class="play cover-btn" data-act="play" title="Играть" style="background-image:url('${t.cover}')">${icon('play', 16)}</button>
     <div class="meta">
       <div class="title">${esc(t.title)} ${t.explicit ? '<span class="badge">18+</span>' : ''}</div>
       <div class="sub">
         <a href="#/u/${encodeURIComponent(t.artist.username)}">${esc(t.artist.username)}</a>
         <span>${fmt(t.duration)}</span>
-        ${t.features?.bpm ? `<span title="Темп, определён анализом звука">${t.features.bpm} BPM</span>` : ''}
         <span class="stat" title="Лайки">${icon('heart', 12)}${t.likes}</span>
         ${t.tags.map((g) => `<a class="chip tag" href="#/tag/${encodeURIComponent(g)}">#${esc(g)}</a>`).join('')}
       </div>
@@ -435,9 +456,10 @@ function trackRow(item, idx) {
   </div>`;
 }
 
-function renderTrackList(container, items, { mode = 'list' } = {}) {
+const EMPTY_DEFAULT = 'Тут пока тихо. <a href="#/upload">Добавим музыки?</a>';
+function renderTrackList(container, items, { mode = 'list', empty = EMPTY_DEFAULT } = {}) {
   if (!items.length) {
-    container.innerHTML = '<p class="empty">Пока пусто.</p>';
+    container.innerHTML = `<div class="empty">${empty}</div>`;
     return;
   }
   container.innerHTML = `<div class="tracks">${items.map(trackRow).join('')}</div>`;
@@ -489,12 +511,15 @@ const routes = {
   quick: renderQuick,
   new: () => renderList('Новое', '/api/tracks'),
   top: () => renderList('Лучшее', '/api/tracks?sort=top'),
-  following: () => requireLogin() && renderList('Новое от подписок', '/api/tracks?feed=following'),
-  likes: () => requireLogin() && renderList('Мне нравится', '/api/likes'),
+  following: () => requireLogin() && renderList('Новое от подписок', '/api/tracks?feed=following',
+    'Подпишитесь на артистов, которые вам по душе, — их новые треки будут появляться здесь.'),
+  likes: () => requireLogin() && renderList('Мне нравится', '/api/likes',
+    'Отмечайте сердечком треки, которые цепляют, — они соберутся здесь.'),
   tag: (tag) => renderList(`#${tag}`, `/api/tracks?tag=${encodeURIComponent(tag)}`),
-  search: (q) => renderList(`Поиск: ${q}`, `/api/tracks?q=${encodeURIComponent(q)}`),
+  search: (q) => renderList(`Поиск: ${q}`, `/api/tracks?q=${encodeURIComponent(q)}`,
+    'Ничего не нашлось. Попробуйте другое слово — или <a href="#/upload">найдите свободную музыку</a>.'),
   u: renderProfile,
-  upload: renderUpload,
+  upload: (tab) => renderUpload(tab),
   taste: renderTaste,
   login: renderLogin,
 };
@@ -515,10 +540,10 @@ async function router() {
   try { await fn(arg); } catch (e) { view.innerHTML = `<p class="muted">${esc(e.message)}</p>`; }
 }
 
-async function renderList(title, url) {
+async function renderList(title, url, empty) {
   const { tracks } = await api(url);
   view.innerHTML = `<h1>${esc(title)}</h1><div id="list"></div>`;
-  renderTrackList($('#list'), tracks.map((track) => ({ track })));
+  renderTrackList($('#list'), tracks.map((track) => ({ track })), { empty });
 }
 
 // ---------- Волна ----------
@@ -549,15 +574,21 @@ async function renderWave() {
   }
   if (!state.settings) state.settings = (await api('/api/wave/settings')).settings;
   const s = state.settings;
-  const { tags } = await api('/api/tags');
+  const [{ tags }, { tracks: some }] = await Promise.all([api('/api/tags'), api('/api/tracks?limit=40')]);
+  const fewTracks = some.length < 30;
   view.innerHTML = `
     <section class="hero">
-      <h1>Моя волна</h1>
+      <h1>${greeting()}, ${esc(state.me.username)}</h1>
       <button class="primary wave-btn" id="wave-start">
-        ${icon(state.mode === 'wave' ? 'rotate' : 'play', 18)}<span>${state.mode === 'wave' ? 'Заново' : 'Слушать'}</span>
+        ${icon(state.mode === 'wave' ? 'rotate' : 'play', 18)}<span>${state.mode === 'wave' ? 'Начать заново' : 'Включить мою волну'}</span>
       </button>
       <div id="context-line" class="ctx-line"></div>
     </section>
+    ${fewTracks ? `
+    <a class="card hint" href="#/upload">
+      <span>Музыки пока немного — волне не из чего выбирать. Добавим свободной музыки или вашей из папки?</span>
+      <span class="hint-go">Добавить музыку →</span>
+    </a>` : ''}
 
     <section class="tune">
       <div class="slider">
@@ -565,14 +596,14 @@ async function renderWave() {
         <input type="range" id="discovery" min="0" max="100" value="${Math.round(s.discovery * 100)}" aria-label="Любимое или новое">
       </div>
       <div class="slider">
-        <div class="labels"><span>Популярное</span><span>Андеграунд</span></div>
+        <div class="labels"><span>Популярное</span><span>Малоизвестное</span></div>
         <input type="range" id="underground" min="0" max="100" value="${Math.round(s.underground * 100)}" aria-label="Популярное или андеграунд">
       </div>
     </section>
 
     <section class="bridge">
       <div class="row">
-        <span class="bridge-label">Мост</span>
+        <span class="bridge-label">Плавный переход</span>
         <input type="text" id="b-from" list="tags" placeholder="от, напр. lofi" value="${esc(state.bridge?.from ?? '')}">
         <span class="muted">→</span>
         <input type="text" id="b-to" list="tags" placeholder="к, напр. dnb" value="${esc(state.bridge?.to ?? '')}">
@@ -613,7 +644,7 @@ function renderQueue() {
   const el = $('#queue');
   if (!el) return;
   $('#queue-title').textContent = state.mode === 'bridge'
-    ? `Мост #${state.bridge.from} → #${state.bridge.to}` : 'Дальше';
+    ? `Переход от #${state.bridge.from} к #${state.bridge.to}` : 'Дальше';
   if (!state.queue.length) {
     el.innerHTML = `<p class="muted">${state.mode ? 'Подбираю…' : 'Нажмите «Моя волна», чтобы начать.'}</p>`;
     return;
@@ -694,9 +725,10 @@ async function previewNext(outcome) {
   state.mode = 'preview';
   const t = item.track;
   box.innerHTML = `
+    <img class="q-cover" src="${t.cover}" alt="">
     <div class="q-title">${esc(t.title)} ${t.explicit ? '<span class="badge">18+</span>' : ''}</div>
     <div class="q-artist"><a href="#/u/${encodeURIComponent(t.artist.username)}">${esc(t.artist.username)}</a></div>
-    <div class="chips">${t.tags.map((g) => `<span class="chip">#${esc(g)}</span>`).join('')}${t.features?.bpm ? `<span class="chip">${t.features.bpm} BPM</span>` : ''}</div>
+    <div class="chips">${t.tags.map((g) => `<span class="chip">#${esc(g)}</span>`).join('')}${t.features?.bpm ? `<span class="chip">${tempoWord(t.features.bpm)}</span>` : ''}</div>
     <div class="why">${esc(item.reasons[0] ?? '')}</div>
     <div class="q-moment">с ${fmt(t.moment.start)} · ${{ listeners: 'лучший момент определили слушатели', audio: 'лучший момент — по анализу звука', default: 'пока мало данных' }[t.moment.source]}</div>
     <div class="progress"><div id="q-bar"></div></div>
@@ -784,7 +816,7 @@ async function renderTaste() {
     <div class="card sound-card">
       <div class="big-sound">${esc(profile.sound.text)}</div>
       <div class="sound-meters">
-        ${[['energy', 'Энергия'], ['percussive', 'Ударность'], ['brightness', 'Яркость'], ['dynamics', 'Динамика']].map(([k, label]) => `
+        ${[['energy', 'Энергия'], ['percussive', 'Ритм'], ['brightness', 'Яркость'], ['dynamics', 'Перепады']].map(([k, label]) => `
           <div class="taste-tag"><span>${label}</span><div class="meter"><div class="pos" style="width:${Math.round(profile.sound[k] * 100)}%"></div></div><span class="muted">${Math.round(profile.sound[k] * 100)}%</span></div>`).join('')}
       </div>
     </div>` : ''}
@@ -802,7 +834,7 @@ async function renderTaste() {
     </div>
 
     <h2>Что вам нравится</h2>
-    <div class="taste-tags">${profile.topTags.map(([t, v]) => tasteTag(t, v)).join('') || '<p class="muted">Пока пусто.</p>'}</div>
+    <div class="taste-tags">${profile.topTags.map(([t, v]) => tasteTag(t, v)).join('') || '<p class="muted">Пока не знаю — послушайте немного и отметьте, что нравится.</p>'}</div>
 
     <h2>Чего вы избегаете</h2>
     <div class="taste-tags">${profile.avoidTags.map(([t, v]) => tasteTag(t, v)).join('') || '<p class="muted">Ничего.</p>'}</div>
@@ -932,11 +964,397 @@ async function analyzeAudio(file) {
   return { duration: buf.duration, peak: rms.length > 2 * W ? best / 2 : null, features };
 }
 
-function renderUpload() {
+// ============================================================
+// Большой плеер: обложка, «живой» звук, эквалайзер
+// ============================================================
+let vizRaf = 0;
+
+function openFull() {
+  if (!state.cur) return;
+  // На компьютере визуализация слушает настоящий звук. На iPhone — спокойная анимация:
+  // подключение Web Audio там может останавливать музыку при блокировке экрана.
+  if (!isIOS() && ensureGraph(audio)) applyEq(loadEq());
+  $('#full').classList.remove('hidden');
+  document.body.classList.add('full-open');
+  renderFull();
+  drawViz();
+}
+
+function closeFull() {
+  $('#full').classList.add('hidden');
+  document.body.classList.remove('full-open');
+  cancelAnimationFrame(vizRaf);
+}
+
+function renderFull() {
+  const c = state.cur;
+  if (!c) return closeFull();
+  const t = c.track;
+  $('#full-cover').src = t.cover;
+  $('#full-title').textContent = t.title;
+  $('#full-artist').innerHTML = `<a href="#/u/${encodeURIComponent(t.artist.username)}">${esc(t.artist.username)}</a>`;
+  $('#full-why').textContent = c.reasons[0] ?? '';
+  const liked = t.my_reaction > 0;
+  $('#full-like').innerHTML = icon(liked ? 'heartFill' : 'heart');
+  $('#full-like').classList.toggle('active', liked);
+  $('#full-toggle').innerHTML = icon(audio.paused ? 'play' : 'pause', 22);
+  const src = { archive: 'Internet Archive', jamendo: 'Jamendo' }[t.source];
+  $('#full-source').innerHTML = src
+    ? `Из ${src}${t.license ? ` · ${licenseLink(t.license, 'лицензия')}` : ''}${t.source_url ? ` · <a href="${esc(t.source_url)}" target="_blank" rel="noopener">страница</a>` : ''}`
+    : '';
+}
+
+function drawViz() {
+  const canvas = $('#full-viz');
+  const g = canvas.getContext('2d');
+  const n = 40;
+  const tick = (now) => {
+    if ($('#full').classList.contains('hidden')) return;
+    const dpr = devicePixelRatio || 1;
+    const w = (canvas.width = canvas.clientWidth * dpr);
+    const h = (canvas.height = canvas.clientHeight * dpr);
+    g.clearRect(0, 0, w, h);
+    let lv = graphReady() && !audio.paused ? levels(n) : null;
+    if (!lv) {
+      const e = state.cur?.track.features?.energy ?? 0.5;
+      lv = Array.from({ length: n }, (_, i) => (audio.paused ? 0.03
+        : (0.2 + 0.35 * e) * (0.55 + 0.45 * Math.sin(now / 430 + i * 0.55)) * (0.65 + 0.35 * Math.sin(now / 1300 + i * 0.21))));
+    }
+    g.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#c96442';
+    const bw = w / n;
+    lv.forEach((v, i) => {
+      const bh = Math.max(3 * dpr, v * h);
+      g.globalAlpha = 0.35 + 0.65 * v;
+      const x = i * bw + bw * 0.22;
+      if (g.roundRect) { g.beginPath(); g.roundRect(x, h - bh, bw * 0.56, bh, bw * 0.28); g.fill(); }
+      else g.fillRect(x, h - bh, bw * 0.56, bh);
+    });
+    g.globalAlpha = 1;
+    vizRaf = requestAnimationFrame(tick);
+  };
+  cancelAnimationFrame(vizRaf);
+  vizRaf = requestAnimationFrame(tick);
+}
+
+function renderEq() {
+  const st = loadEq();
+  const panel = $('#eq-panel');
+  panel.innerHTML = `
+    <label class="switch"><input type="checkbox" id="eq-on" ${st.on ? 'checked' : ''}><span>Включить эквалайзер</span></label>
+    <div class="chips eq-presets">${Object.entries(PRESETS).map(([k, pr]) =>
+      `<button class="chip ${st.preset === k ? 'pos' : ''}" data-preset="${k}">${pr.name}</button>`).join('')}</div>
+    <div class="eq-bands">${BANDS.map((b, i) => `
+      <label><input type="range" min="-12" max="12" step="1" value="${st.gains[i]}" data-band="${i}" aria-label="${b.label}">
+      <span>${b.label}</span></label>`).join('')}</div>
+    ${isIOS() ? '<p class="muted small">На iPhone с эквалайзером музыка может останавливаться при заблокированном экране.</p>' : ''}`;
+  const update = (patch) => {
+    const next = { ...loadEq(), ...patch };
+    saveEq(next);
+    if (next.on) ensureGraph(audio); // вызывается из клика — браузер разрешит звук
+    applyEq(next);
+    return next;
+  };
+  panel.onchange = (e) => {
+    if (e.target.id === 'eq-on') { update({ on: e.target.checked }); renderEq(); }
+  };
+  panel.oninput = (e) => {
+    const i = e.target.dataset.band;
+    if (i === undefined) return;
+    const gains = [...loadEq().gains];
+    gains[Number(i)] = Number(e.target.value);
+    update({ gains, preset: 'custom', on: true });
+    $('#eq-on').checked = true;
+  };
+  panel.onclick = (e) => {
+    const b = e.target.closest('[data-preset]');
+    if (!b) return;
+    update({ preset: b.dataset.preset, gains: [...PRESETS[b.dataset.preset].gains], on: b.dataset.preset !== 'flat' });
+    renderEq();
+  };
+}
+
+$('#p-open').addEventListener('click', (e) => { if (!e.target.closest('a')) openFull(); });
+$('#full-close').addEventListener('click', closeFull);
+$('#full').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-proxy]');
+  if (b) { $(b.dataset.proxy).click(); setTimeout(renderFull, 150); }
+});
+$('#eq-toggle').addEventListener('click', () => {
+  const panel = $('#eq-panel');
+  panel.classList.toggle('hidden');
+  if (!panel.classList.contains('hidden')) renderEq();
+});
+$('#full-range').addEventListener('change', (e) => {
+  if (audio.duration > 0) audio.currentTime = (e.target.value / 1000) * audio.duration;
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeFull(); });
+window.addEventListener('hashchange', closeFull);
+audio.addEventListener('play', () => { if (!$('#full').classList.contains('hidden')) renderFull(); });
+audio.addEventListener('pause', () => { if (!$('#full').classList.contains('hidden')) renderFull(); });
+
+// ============================================================
+// Добавить музыку: свободная музыка, Jamendo, своя папка, один трек
+// ============================================================
+
+const AUDIO_EXT = { mp3: 'audio/mpeg', flac: 'audio/flac', ogg: 'audio/ogg', opus: 'audio/opus', m4a: 'audio/mp4', aac: 'audio/aac', wav: 'audio/wav', webm: 'audio/webm' };
+const STARTER = [
+  ['lofi', 'lofi'], ['электроника', 'electronic'], ['эмбиент', 'ambient'], ['джаз', 'jazz'],
+  ['рок', 'rock'], ['хип-хоп', 'hip hop'], ['пианино', 'piano'], ['синтвейв', 'synthwave'],
+];
+
+// Импортированные треки докачиваются в браузер и анализируются в фоне — темп, энергия, лучший момент
+const analysisQueue = [];
+let analysing = false;
+function queueAnalysis(tracks) {
+  analysisQueue.push(...tracks.filter((t) => !t.features));
+  runAnalysis();
+}
+async function runAnalysis() {
+  if (analysing) return;
+  analysing = true;
+  while (analysisQueue.length) {
+    const t = analysisQueue.shift();
+    try {
+      const blob = await (await fetch(`/api/tracks/${t.id}/stream`)).blob();
+      const info = await analyzeAudio(blob);
+      await api(`/api/tracks/${t.id}/analysis`, { method: 'PUT', body: info });
+    } catch { /* не получилось — не страшно, трек всё равно играет */ }
+  }
+  analysing = false;
+}
+
+const ADD_TABS = [
+  ['archive', 'Свободная музыка'],
+  ['jamendo', 'Jamendo'],
+  ['folder', 'Своя папка'],
+  ['single', 'Свой трек'],
+];
+
+async function renderUpload(tab) {
   if (!requireLogin()) return;
+  const current = ADD_TABS.some(([k]) => k === tab) ? tab : 'archive';
   view.innerHTML = `
-    <h1>Загрузить трек</h1>
-    <p class="lead">Без премодерации и скрытых понижений в выдаче. Удаляем только то, что нарушает закон или чужие права.</p>
+    <h1>Добавить музыку</h1>
+    <p class="lead">Своя музыка или свободная — от независимых артистов, которые сами разрешили её слушать и делиться ею.</p>
+    <div class="tabs">${ADD_TABS.map(([k, name]) => `<a href="#/upload/${k}" class="${k === current ? 'on' : ''}">${name}</a>`).join('')}</div>
+    <div id="add-pane"></div>`;
+  const pane = $('#add-pane');
+  if (current === 'archive') renderArchivePane(pane);
+  else if (current === 'jamendo') renderJamendoPane(pane);
+  else if (current === 'folder') renderFolderPane(pane);
+  else renderSingleUpload(pane);
+}
+
+function licenseLink(url, name) {
+  return url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(name || 'лицензия')}</a>` : esc(name || '');
+}
+
+function renderArchivePane(pane) {
+  pane.innerHTML = `
+    <div class="card starter">
+      <div>
+        <div class="starter-title">Пусто? Соберу стартовую подборку</div>
+        <div class="muted">Пара альбомов lofi, электроники, эмбиента, джаза, рока, хип-хопа, пианино и синтвейва — около 25 треков.</div>
+      </div>
+      <button class="primary" id="starter">Собрать</button>
+    </div>
+    <div id="starter-status" class="muted"></div>
+    <form id="ia-search" class="row find">
+      <input type="text" name="q" placeholder="Жанр, настроение или артист — например, piano, chill, rock" required>
+      <button class="primary">Найти</button>
+    </form>
+    <p class="muted small">Источник — Internet Archive: музыка под свободными лицензиями Creative Commons. У каждого трека сохраняются автор и лицензия.</p>
+    <div id="ia-results" class="albums"></div>`;
+
+  const results = $('#ia-results');
+  const add = async (id, btn, limit = 6) => {
+    btn.disabled = true;
+    btn.textContent = 'Добавляю…';
+    try {
+      const { tracks } = await api('/api/import/archive', { method: 'POST', body: { id, limit } });
+      btn.textContent = `Добавлено: ${tracks.length}`;
+      queueAnalysis(tracks);
+      return tracks.length;
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = 'Добавить';
+      toast(e.message);
+      return 0;
+    }
+  };
+  $('#ia-search').onsubmit = async (e) => {
+    e.preventDefault();
+    results.innerHTML = '<p class="muted">Ищу…</p>';
+    try {
+      const { items } = await api(`/api/import/archive?q=${encodeURIComponent(e.target.q.value)}`);
+      results.innerHTML = items.length ? items.map((it) => `
+        <div class="album">
+          <img src="${esc(it.cover)}" alt="" loading="lazy">
+          <div class="album-meta">
+            <div class="title">${esc(it.title)}</div>
+            <div class="muted">${esc(it.artist)}${it.year ? ` · ${esc(it.year)}` : ''}</div>
+            <div class="muted small">${licenseLink(it.license, it.licenseName)} · <a href="${esc(it.page)}" target="_blank" rel="noopener">страница</a></div>
+          </div>
+          <button data-ia="${esc(it.id)}">Добавить</button>
+        </div>`).join('') : '<p class="empty">Ничего не нашлось. Попробуйте другое слово, например по-английски.</p>';
+    } catch (er) { results.innerHTML = `<p class="empty">${esc(er.message)}</p>`; }
+  };
+  results.onclick = (e) => {
+    const b = e.target.closest('[data-ia]');
+    if (b) add(b.dataset.ia, b);
+  };
+  $('#starter').onclick = async (e) => {
+    const btn = e.target.closest('button');
+    btn.disabled = true;
+    const status = $('#starter-status');
+    let total = 0;
+    for (const [ru, q] of STARTER) {
+      status.textContent = `Ищу ${ru}… (добавлено ${total})`;
+      try {
+        const { items } = await api(`/api/import/archive?q=${encodeURIComponent(q)}`);
+        for (const it of items.slice(0, 3)) {
+          const fake = document.createElement('button');
+          const n = await add(it.id, fake, 3);
+          if (n) { total += n; break; }
+        }
+      } catch { /* жанр не нашёлся — идём дальше */ }
+    }
+    status.innerHTML = total
+      ? `Готово: добавлено ${total} треков. <a href="#/wave">Включить волну</a>`
+      : 'Не получилось связаться с Internet Archive. Проверьте интернет и попробуйте ещё раз.';
+    btn.disabled = false;
+  };
+}
+
+async function renderJamendoPane(pane) {
+  const { jamendo } = await api('/api/import/settings');
+  if (!jamendo) {
+    pane.innerHTML = `
+      <div class="card">
+        <p style="margin-top:0">Jamendo — большой каталог свободной музыки. Чтобы искать в нём, нужен бесплатный ключ:</p>
+        <ol class="steps">
+          <li>Зарегистрируйтесь на <a href="https://devportal.jamendo.com" target="_blank" rel="noopener">devportal.jamendo.com</a>.</li>
+          <li>Создайте приложение (название любое, например NEYAMI).</li>
+          <li>Скопируйте <b>Client ID</b> и вставьте сюда.</li>
+        </ol>
+        <form id="jam-key" class="row">
+          <input type="text" name="key" placeholder="Client ID" autocomplete="off" required>
+          <button class="primary">Сохранить</button>
+        </form>
+      </div>`;
+    $('#jam-key').onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        await api('/api/import/settings', { method: 'PUT', body: { jamendo_key: e.target.key.value } });
+        renderJamendoPane(pane);
+      } catch (er) { toast(er.message); }
+    };
+    return;
+  }
+  pane.innerHTML = `
+    <form id="jam-search" class="row find">
+      <input type="text" name="q" placeholder="Жанр, настроение или артист" required>
+      <button class="primary">Найти</button>
+    </form>
+    <div id="jam-results" class="albums"></div>
+    <p class="muted small"><a href="#" id="jam-reset">Сменить ключ Jamendo</a></p>`;
+  $('#jam-reset').onclick = async (e) => {
+    e.preventDefault();
+    await api('/api/import/settings', { method: 'PUT', body: { jamendo_key: '' } });
+    renderJamendoPane(pane);
+  };
+  const results = $('#jam-results');
+  $('#jam-search').onsubmit = async (e) => {
+    e.preventDefault();
+    results.innerHTML = '<p class="muted">Ищу…</p>';
+    try {
+      const { tracks } = await api(`/api/import/jamendo?q=${encodeURIComponent(e.target.q.value)}`);
+      results.innerHTML = tracks.length ? tracks.map((t) => `
+        <div class="album">
+          <img src="${esc(t.cover ?? '')}" alt="" loading="lazy">
+          <div class="album-meta">
+            <div class="title">${esc(t.title)}</div>
+            <div class="muted">${esc(t.artist)}${t.album ? ` · ${esc(t.album)}` : ''}</div>
+            <div class="muted small">${licenseLink(t.license, t.licenseName)}</div>
+          </div>
+          <button data-jam="${esc(t.id)}">Добавить</button>
+        </div>`).join('') : '<p class="empty">Ничего не нашлось.</p>';
+    } catch (er) { results.innerHTML = `<p class="empty">${esc(er.message)}</p>`; }
+  };
+  results.onclick = async (e) => {
+    const b = e.target.closest('[data-jam]');
+    if (!b) return;
+    b.disabled = true;
+    b.textContent = 'Добавляю…';
+    try {
+      const { tracks } = await api('/api/import/jamendo', { method: 'POST', body: { ids: [b.dataset.jam] } });
+      b.textContent = 'Добавлено';
+      queueAnalysis(tracks);
+    } catch (er) { b.disabled = false; b.textContent = 'Добавить'; toast(er.message); }
+  };
+}
+
+function renderFolderPane(pane) {
+  pane.innerHTML = `
+    <p class="muted">Выберите папку с музыкой или несколько файлов. Название, артиста, жанр и обложку NEYAMI возьмёт из самого файла.</p>
+    <div class="row">
+      <label class="pick"><input type="file" id="pick-folder" webkitdirectory multiple hidden>Выбрать папку</label>
+      <label class="pick"><input type="file" id="pick-files" accept="audio/*,.flac,.opus,.m4a" multiple hidden>Выбрать файлы</label>
+    </div>
+    <div class="progress" style="margin-top:16px"><div id="folder-bar"></div></div>
+    <div id="folder-status" class="muted" style="margin-top:8px"></div>
+    <div id="folder-list" class="folder-list"></div>`;
+  const onPick = (e) => importFiles([...e.target.files]);
+  $('#pick-folder').onchange = onPick;
+  $('#pick-files').onchange = onPick;
+}
+
+async function importFiles(all) {
+  const files = all.filter((f) => AUDIO_EXT[f.name.split('.').pop().toLowerCase()]);
+  const list = $('#folder-list');
+  const status = $('#folder-status');
+  if (!files.length) { status.textContent = 'В выбранном нет аудиофайлов.'; return; }
+  let done = 0;
+  let ok = 0;
+  list.innerHTML = '';
+  for (const file of files) {
+    status.textContent = `Добавляю ${done + 1} из ${files.length}: ${file.name}`;
+    const row = document.createElement('div');
+    row.textContent = file.name;
+    list.prepend(row);
+    try {
+      const tags = readId3(await file.slice(0, 4 * 1024 * 1024).arrayBuffer());
+      const guess = guessFromFilename(file.name);
+      const title = tags.title || guess.title;
+      const artist = tags.artist || guess.artist || '';
+      let info = { duration: null, peak: null, features: null };
+      try { info = await analyzeAudio(file); } catch { /* не декодировалось — загрузим без анализа */ }
+      const params = new URLSearchParams({ title, tags: tags.genre ?? '', source: 'folder' });
+      if (artist) params.set('artist', artist);
+      if (info.duration) params.set('duration', info.duration.toFixed(2));
+      if (info.peak != null) params.set('peak', info.peak.toFixed(1));
+      if (info.features) params.set('features', JSON.stringify(info.features));
+      const type = file.type || AUDIO_EXT[file.name.split('.').pop().toLowerCase()];
+      const res = await fetch(`/api/tracks?${params}`, { method: 'POST', headers: { 'Content-Type': type }, body: file });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'ошибка');
+      if (tags.picture) {
+        await fetch(`/api/tracks/${data.track.id}/cover`, { method: 'POST', headers: { 'Content-Type': tags.picture.mime }, body: tags.picture.data }).catch(() => {});
+      }
+      row.innerHTML = `${icon('heart', 12)} <b>${esc(title)}</b> <span class="muted">— ${esc(artist || state.me.username)}</span>`;
+      ok++;
+    } catch (e) {
+      row.innerHTML = `<span class="muted">Не получилось: ${esc(file.name)} — ${esc(e.message)}</span>`;
+    }
+    done++;
+    $('#folder-bar').style.width = `${(done / files.length) * 100}%`;
+  }
+  status.innerHTML = `Готово: добавлено ${ok} из ${files.length}. <a href="#/new">Посмотреть</a> или <a href="#/wave">включить волну</a>.`;
+}
+
+function renderSingleUpload(pane) {
+  pane.innerHTML = `
+    <p class="muted">Ваш собственный трек. Без премодерации и скрытых понижений в выдаче — удаляем только то, что нарушает закон или чужие права.</p>
     <form class="form card" id="up">
       <label>Аудиофайл (mp3, ogg, opus, wav, flac, m4a — до 100 МБ)<input type="file" name="file" accept="audio/*" required></label>
       <label>Название<input type="text" name="title" maxlength="200" required></label>

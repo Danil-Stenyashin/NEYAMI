@@ -33,7 +33,7 @@
         <a href="#/following" data-nav="following"><span data-icon="users"></span>Подписки</a>
         <a href="#/likes" data-nav="likes"><span data-icon="heart"></span>Мне нравится</a>
         <a href="#/taste" data-nav="taste"><span data-icon="compass"></span>Мой вкус</a>
-        <a href="#/upload" data-nav="upload"><span data-icon="upload"></span>Загрузить</a>
+        <a href="#/upload" data-nav="upload"><span data-icon="plus"></span>Добавить музыку</a>
       </nav>
       <div id="account" class="account"></div>
     </aside>
@@ -47,9 +47,12 @@
   </div>
 
   <footer id="player" class="player hidden">
-    <div class="p-info">
-      <div class="p-title" id="p-title"></div>
-      <div class="p-artist" id="p-artist"></div>
+    <div class="p-info" id="p-open" title="Открыть большой плеер">
+      <img id="p-cover" class="p-cover" alt="">
+      <div class="p-text">
+        <div class="p-title" id="p-title"></div>
+        <div class="p-artist" id="p-artist"></div>
+      </div>
     </div>
     <div class="p-controls">
       <button id="p-dislike" class="icon-btn" title="Не то — волна учтёт" data-icon="dislike"></button>
@@ -68,6 +71,37 @@
     </div>
     <div class="p-reasons" id="p-reasons"></div>
   </footer>
+
+  <!-- Большой плеер: обложка, «живой» звук, эквалайзер -->
+  <div id="full" class="full hidden" role="dialog" aria-label="Сейчас играет">
+    <button id="full-close" class="icon-btn full-close" title="Свернуть (Esc)" data-icon="x"></button>
+    <div class="full-inner">
+      <div class="full-art">
+        <img id="full-cover" alt="">
+        <canvas id="full-viz" aria-hidden="true"></canvas>
+      </div>
+      <div class="full-side">
+        <div class="full-title" id="full-title"></div>
+        <div class="full-artist" id="full-artist"></div>
+        <div class="full-why" id="full-why"></div>
+        <div class="full-seek">
+          <span id="full-time">0:00</span>
+          <input id="full-range" type="range" min="0" max="1000" value="0" aria-label="Перемотка">
+          <span id="full-dur">0:00</span>
+        </div>
+        <div class="full-controls">
+          <button class="icon-btn" data-proxy="#p-dislike" title="Не то" data-icon="dislike"></button>
+          <button class="icon-btn" id="full-like" data-proxy="#p-like" title="Нравится" data-icon="heart"></button>
+          <button class="big" id="full-toggle" data-proxy="#p-toggle" title="Играть / пауза" data-icon="play"></button>
+          <button class="icon-btn" data-proxy="#p-next" title="Дальше" data-icon="next"></button>
+          <button class="icon-btn" data-proxy="#p-drop" title="К лучшему моменту" data-icon="target"></button>
+        </div>
+        <button id="eq-toggle" class="ghost eq-toggle">Эквалайзер</button>
+        <div id="eq-panel" class="eq hidden"></div>
+        <div class="full-source" id="full-source"></div>
+      </div>
+    </div>
+  </div>
 
   <audio id="audio" preload="auto"></audio>
   <div id="toast" class="toast"></div>

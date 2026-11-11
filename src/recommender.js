@@ -458,7 +458,7 @@ export function bridge(params) {
     used.add(best.track.id);
     prevArtist = best.track.user_id;
     const pct = Math.round(alpha * 100);
-    const step = `Мост #${from} → #${to}: шаг ${i + 1} из ${steps} (${pct}% пути${target?.bpm ? `, цель ~${target.bpm} BPM` : ''})`;
+    const step = `Плавный переход от #${from} к #${to}: ${i + 1} из ${steps}`;
     items.push({
       track: best.track,
       score: Math.round(bestFit * 1000) / 1000,
@@ -484,7 +484,7 @@ function explain(c, ctx) {
     reasons.push(`Вы часто слушаете такое ${when}`);
   }
   if (parts.sound > 0.45 && t.features) {
-    reasons.push(`Звучит в вашем духе: ${describeSound(t.features)}`);
+    reasons.push(`Звучит в вашем духе — ${describeSound(t.features)}`);
   }
   if (parts.collab > 0.15 && c.collabVia != null) {
     const via = trackById.get(c.collabVia);
@@ -492,9 +492,9 @@ function explain(c, ctx) {
   }
   if (follows.has(t.user_id)) reasons.push(`Вы подписаны на ${t.artist}`);
   else if (parts.artist > 0.3) reasons.push(`Вам нравится ${t.artist}`);
-  if (c.lastHeard && c.own > 0 && ctx.now - c.lastHeard >= DAY) reasons.push('Вы любили этот трек — давно не звучал');
-  if (!c.lastHeard && c.plays < 5) reasons.push('Свежая находка: его ещё почти никто не слышал');
+  if (c.lastHeard && c.own > 0 && ctx.now - c.lastHeard >= DAY) reasons.push('Вы его любили, а он давно не звучал');
+  if (!c.lastHeard && c.plays < 5) reasons.push('Свежая находка — его ещё почти никто не слышал');
   if (!reasons.length && c.pop > 0.6) reasons.push('Популярно у слушателей NEYAMI');
-  if (!reasons.length) reasons.push('Эксперимент — оцените, и волна станет точнее');
+  if (!reasons.length) reasons.push('Пробую что-то новое — подскажите, нравится ли');
   return reasons.slice(0, 3); // три главные причины — дальше читать уже никто не будет
 }

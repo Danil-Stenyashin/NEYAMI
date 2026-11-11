@@ -107,6 +107,12 @@ CREATE TABLE IF NOT EXISTS taste_tags (
 
 -- «Забытые» треки: история по ним стёрта, а оценки до этого момента не влияют на вкус
 -- (лайк при этом остаётся в «Мне нравится»)
+-- Настройки сервера (например, ключ Jamendo)
+CREATE TABLE IF NOT EXISTS app_settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS taste_forgotten (
   user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   track_id    INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
@@ -119,6 +125,12 @@ CREATE TABLE IF NOT EXISTS taste_forgotten (
 const MIGRATIONS = [
   ['tracks', 'features', 'TEXT'],
   ['wave_settings', 'context', 'INTEGER NOT NULL DEFAULT 1'],
+  ['tracks', 'cover', 'TEXT'],                 // файл обложки в uploads/ (иначе — сгенерированная)
+  ['tracks', 'source', "TEXT NOT NULL DEFAULT 'upload'"], // upload | folder | archive | jamendo
+  ['tracks', 'source_url', 'TEXT'],            // страница трека в источнике
+  ['tracks', 'license', 'TEXT'],               // ссылка на лицензию (Creative Commons)
+  ['tracks', 'added_by', 'INTEGER'],           // кто добавил трек чужого артиста (импорт)
+  ['users', 'imported', 'INTEGER NOT NULL DEFAULT 0'], // артист из импорта — войти под ним нельзя
 ];
 
 export function openDb(file) {

@@ -8,6 +8,8 @@ import { hashPassword, verifyPassword, newToken, parseCookies } from './auth.js'
 import { recommend, bridge, buildContext, describeProfile, buildContextSignals, buildProfiles, applyTagOverrides, buildSoundProfile } from './recommender.js';
 import { sanitizeFeatures, describeSound } from './sound.js';
 import { BINS, bestMoment, segmentsToBins, seekBin } from './moments.js';
+import { archiveSearch, archiveItem, archiveFetchTracks, jamendoSearch, jamendoFetchTracks, ImportError } from './importers.js';
+import { coverSvg } from './covers.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -27,13 +29,15 @@ const STATIC_TYPES = {
 };
 const TASTE_ACTIONS = new Set(['forget', 'boost', 'block']);
 const EVENT_TYPES = new Set(['play', 'complete', 'skip', 'preview_complete', 'preview_skip']);
+const IMAGE_TYPES = { 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
+const MAX_COVER = 5 * 1024 * 1024;
 const REPORT_REASONS = new Set(['copyright', 'illegal', 'spam', 'impersonation']);
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
-export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
+export function createApp({ dataDir = path.join(ROOT, 'data'), fetchImpl = globalThis.fetch } = {}) {
   const uploadsDir = path.join(dataDir, 'uploads');
   fs.mkdirSync(uploadsDir, { recursive: true });
   const db = openDb(path.join(dataDir, 'neyami.db'));
@@ -59,6 +63,17 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
       try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
       catch { reject(new HttpError(400, 'Некорректный JSON')); }
     });
+    req.on('error', reject);
+  });
+
+  const readBody = (req, limit) => new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) { reject(new HttpError(413, 'Слишком большой файл')); req.destroy(); } else chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
 
@@ -89,7 +104,8 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
 
   const TRACK_SELECT = `
     SELECT t.id, t.user_id, t.title, t.description, t.tags, t.explicit, t.duration, t.energy_peak, t.features, t.created_at,
-           u.username AS artist,
+           t.cover, t.source, t.source_url, t.license, t.added_by,
+           u.username AS artist, u.imported AS artist_imported,
            (SELECT COUNT(*) FROM reactions r WHERE r.track_id = t.id AND r.value = 1) AS likes,
            (SELECT COUNT(*) FROM events e WHERE e.track_id = t.id AND e.type = 'play') AS plays,
            COALESCE((SELECT value FROM reactions mr WHERE mr.track_id = t.id AND mr.user_id = ?), 0) AS my_reaction
@@ -102,14 +118,66 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
     return heat;
   };
 
-  const toTrack = (r) => ({
+  const toTrack = (r, viewerId = 0) => ({
     moment: bestMoment(loadHeat(r.id), r.duration, r.energy_peak),
+    cover: `/api/tracks/${r.id}/cover${r.cover ? `?v=${r.cover.slice(0, 8)}` : ''}`,
+    source: r.source ?? 'upload', source_url: r.source_url ?? null, license: r.license ?? null,
+    can_edit: Boolean(viewerId) && (r.user_id === viewerId || r.added_by === viewerId),
     id: r.id, title: r.title, description: r.description, tags: decodeTags(r.tags),
     explicit: Boolean(r.explicit), duration: r.duration, created_at: r.created_at,
     artist: { id: r.user_id, username: r.artist },
     likes: r.likes, plays: r.plays, my_reaction: r.my_reaction,
     features: sanitizeFeatures(r.features),
   });
+
+  /**
+   * Артист для трека, загруженного не самим автором (папка, импорт).
+   * Привязываем только к «импортированным» артистам — к профилю живого человека чужой трек не прилипнет.
+   */
+  const resolveArtist = (rawName, me) => {
+    const name = String(rawName ?? '').replace(/\s+/g, ' ').trim().slice(0, 60);
+    if (!name || name.toLowerCase() === me.username.toLowerCase()) return me.id;
+    for (const candidate of [name, `${name} (импорт)`]) {
+      const row = q('SELECT id, imported FROM users WHERE username = ?').get(candidate);
+      if (row?.imported) return row.id;
+      if (!row) {
+        const { lastInsertRowid } = q('INSERT INTO users (username, pass_hash, bio, imported, created_at) VALUES (?, ?, ?, 1, ?)')
+          .run(candidate, '!', 'Артист добавлен вместе с треками', Date.now());
+        return Number(lastInsertRowid);
+      }
+    }
+    return me.id;
+  };
+
+  const saveCover = (buf, type) => {
+    const ext = IMAGE_TYPES[String(type ?? '').toLowerCase()];
+    if (!ext || !buf?.length || buf.length > MAX_COVER) return null;
+    const name = `cover-${crypto.randomBytes(12).toString('hex')}.${ext}`;
+    fs.writeFileSync(path.join(uploadsDir, name), buf);
+    return name;
+  };
+
+  /** Сохраняет трек из памяти (импорт). Возвращает id. */
+  const insertImported = (t, me) => {
+    const fileName = `${crypto.randomBytes(16).toString('hex')}.mp3`;
+    fs.writeFileSync(path.join(uploadsDir, fileName), t.audio);
+    const artistId = resolveArtist(t.artist, me);
+    const cover = t.cover ? saveCover(t.cover.buf, t.cover.type) : null;
+    const { lastInsertRowid } = q(`INSERT INTO tracks (user_id, title, description, tags, explicit, file, mime, size, duration,
+        cover, source, source_url, license, added_by, created_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      artistId, t.title || 'Без названия', t.description ?? '', encodeTags(parseTags(t.tags)), fileName, t.mime,
+      t.audio.length, t.duration ?? null, cover, t.source, t.sourceUrl ?? null, t.license ?? null,
+      artistId === me.id ? null : me.id, Date.now(),
+    );
+    return Number(lastInsertRowid);
+  };
+
+  const canEdit = (trackId, me) => {
+    const row = q('SELECT user_id, added_by, file, cover FROM tracks WHERE id = ?').get(trackId);
+    if (!row) throw new HttpError(404, 'Трек не найден');
+    if (row.user_id !== me.id && row.added_by !== me.id) throw new HttpError(403, 'Это может только тот, кто добавил трек');
+    return row;
+  };
 
   const getTrack = (id, viewerId = 0) => {
     const row = q(`${TRACK_SELECT} WHERE t.id = ?`).get(viewerId, id);
@@ -174,11 +242,12 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
     const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 50));
     const rows = q(`${TRACK_SELECT} ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
                     ORDER BY ${order} LIMIT ${limit}`).all(...args);
-    send(res, 200, { tracks: rows.map(toTrack) });
+    send(res, 200, { tracks: rows.map((r) => toTrack(r, me?.id ?? 0)) });
   });
 
   route('GET', '/api/tracks/:id', async (req, res, p) => {
-    send(res, 200, { track: toTrack(getTrack(Number(p.id), currentUser(req)?.id ?? 0)) });
+    const viewer = currentUser(req)?.id ?? 0;
+    send(res, 200, { track: toTrack(getTrack(Number(p.id), viewer), viewer) });
   });
 
   // Загрузка: тело запроса — сам аудиофайл, метаданные — в query string.
@@ -212,24 +281,119 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
     const duration = Number(url.searchParams.get('duration'));
     const peak = Number(url.searchParams.get('peak'));
     const features = sanitizeFeatures(url.searchParams.get('features'));
-    const { lastInsertRowid } = q(`INSERT INTO tracks (user_id, title, description, tags, explicit, file, mime, size, duration, energy_peak, features, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-      me.id, title, String(url.searchParams.get('description') ?? '').slice(0, 5000),
+    // Из своей папки можно добавить трек другого артиста (по тегам файла)
+    const artistId = url.searchParams.get('artist') ? resolveArtist(url.searchParams.get('artist'), me) : me.id;
+    const source = url.searchParams.get('source') === 'folder' ? 'folder' : 'upload';
+    const { lastInsertRowid } = q(`INSERT INTO tracks (user_id, title, description, tags, explicit, file, mime, size, duration, energy_peak, features,
+      source, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      artistId, title, String(url.searchParams.get('description') ?? '').slice(0, 5000),
       encodeTags(parseTags(url.searchParams.get('tags'))), url.searchParams.get('explicit') === '1' ? 1 : 0,
       fileName, mime, size, Number.isFinite(duration) && duration > 0 ? duration : null,
-      Number.isFinite(peak) && peak >= 0 ? peak : null, features ? JSON.stringify(features) : null, Date.now(),
+      Number.isFinite(peak) && peak >= 0 ? peak : null, features ? JSON.stringify(features) : null,
+      source, artistId === me.id ? null : me.id, Date.now(),
     );
-    send(res, 201, { track: toTrack(getTrack(Number(lastInsertRowid), me.id)) });
+    send(res, 201, { track: toTrack(getTrack(Number(lastInsertRowid), me.id), me.id) });
   });
 
   route('DELETE', '/api/tracks/:id', async (req, res, p) => {
     const me = requireUser(req);
-    const row = q('SELECT user_id, file FROM tracks WHERE id = ?').get(Number(p.id));
-    if (!row) throw new HttpError(404, 'Трек не найден');
-    if (row.user_id !== me.id) throw new HttpError(403, 'Удалять можно только свои треки');
+    const row = canEdit(Number(p.id), me);
     q('DELETE FROM tracks WHERE id = ?').run(Number(p.id));
     fs.rm(path.join(uploadsDir, row.file), { force: true }, () => {});
+    if (row.cover) fs.rm(path.join(uploadsDir, row.cover), { force: true }, () => {});
     send(res, 200, { ok: true });
+  });
+
+  // ---------- обложки ----------
+  route('GET', '/api/tracks/:id/cover', async (req, res, p) => {
+    const row = q('SELECT t.id, t.title, t.cover, u.username AS artist FROM tracks t JOIN users u ON u.id = t.user_id WHERE t.id = ?').get(Number(p.id));
+    if (!row) throw new HttpError(404, 'Трек не найден');
+    const file = row.cover && path.join(uploadsDir, row.cover);
+    if (file && fs.existsSync(file)) {
+      const type = Object.entries(IMAGE_TYPES).find(([, e]) => file.endsWith(`.${e}`))?.[0] ?? 'image/jpeg';
+      res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'public, max-age=86400', 'X-Content-Type-Options': 'nosniff' });
+      return fs.createReadStream(file).pipe(res);
+    }
+    res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=86400', 'X-Content-Type-Options': 'nosniff' });
+    res.end(coverSvg(row.id, row.title, row.artist));
+  });
+
+  route('POST', '/api/tracks/:id/cover', async (req, res, p) => {
+    const me = requireUser(req);
+    const row = canEdit(Number(p.id), me);
+    const type = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+    if (!IMAGE_TYPES[type]) throw new HttpError(415, 'Обложка: jpg, png, webp или gif');
+    const buf = await readBody(req, MAX_COVER);
+    const name = saveCover(buf, type);
+    if (!name) throw new HttpError(400, 'Не удалось сохранить обложку');
+    q('UPDATE tracks SET cover = ? WHERE id = ?').run(name, Number(p.id));
+    if (row.cover) fs.rm(path.join(uploadsDir, row.cover), { force: true }, () => {});
+    send(res, 200, { track: toTrack(getTrack(Number(p.id), me.id), me.id) });
+  });
+
+  // Анализ звука для треков, добавленных импортом: браузер декодирует и присылает признаки
+  route('PUT', '/api/tracks/:id/analysis', async (req, res, p) => {
+    const me = requireUser(req);
+    canEdit(Number(p.id), me);
+    const { duration, peak, features } = await readJson(req);
+    const f = sanitizeFeatures(features);
+    q(`UPDATE tracks SET duration = COALESCE(?, duration), energy_peak = COALESCE(?, energy_peak),
+       features = COALESCE(?, features) WHERE id = ?`).run(
+      Number(duration) > 0 ? Number(duration) : null, Number(peak) >= 0 ? Number(peak) : null,
+      f ? JSON.stringify(f) : null, Number(p.id));
+    send(res, 200, { ok: true });
+  });
+
+  // ---------- импорт свободной музыки ----------
+  const importErr = (e) => {
+    if (e instanceof ImportError) throw new HttpError(400, e.message);
+    if (e instanceof HttpError) throw e;
+    throw new HttpError(502, 'Источник недоступен — проверьте интернет и попробуйте ещё раз');
+  };
+  const jamendoKey = () => q("SELECT value FROM app_settings WHERE key = 'jamendo_key'").get()?.value ?? process.env.JAMENDO_KEY ?? '';
+
+  route('GET', '/api/import/settings', async (req, res) => {
+    requireUser(req);
+    send(res, 200, { jamendo: Boolean(jamendoKey()) });
+  });
+  route('PUT', '/api/import/settings', async (req, res) => {
+    requireUser(req);
+    const key = String((await readJson(req)).jamendo_key ?? '').trim();
+    if (key && !/^[A-Za-z0-9]{4,64}$/.test(key)) throw new HttpError(400, 'Ключ Jamendo выглядит неправильно');
+    if (key) q("INSERT INTO app_settings (key, value) VALUES ('jamendo_key', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key);
+    else q("DELETE FROM app_settings WHERE key = 'jamendo_key'").run();
+    send(res, 200, { jamendo: Boolean(key) });
+  });
+
+  route('GET', '/api/import/archive', async (req, res, _p, url) => {
+    requireUser(req);
+    const items = await archiveSearch(fetchImpl, url.searchParams.get('q')).catch(importErr);
+    send(res, 200, { items });
+  });
+  route('GET', '/api/import/archive/:id', async (req, res, p) => {
+    requireUser(req);
+    send(res, 200, { item: await archiveItem(fetchImpl, decodeURIComponent(p.id)).catch(importErr) });
+  });
+  route('POST', '/api/import/archive', async (req, res) => {
+    const me = requireUser(req);
+    const { id, files, limit } = await readJson(req);
+    const list = await archiveFetchTracks(fetchImpl, String(id ?? ''), {
+      files: Array.isArray(files) ? files.map(String) : null,
+      limit: Math.min(12, Math.max(1, Number(limit) || 6)),
+    }).catch(importErr);
+    const ids = list.map((t) => insertImported(t, me));
+    send(res, 201, { tracks: ids.map((i) => toTrack(getTrack(i, me.id), me.id)) });
+  });
+  route('GET', '/api/import/jamendo', async (req, res, _p, url) => {
+    requireUser(req);
+    send(res, 200, { tracks: await jamendoSearch(fetchImpl, jamendoKey(), url.searchParams.get('q')).catch(importErr) });
+  });
+  route('POST', '/api/import/jamendo', async (req, res) => {
+    const me = requireUser(req);
+    const { ids } = await readJson(req);
+    const list = await jamendoFetchTracks(fetchImpl, jamendoKey(), ids).catch(importErr);
+    const saved = list.map((t) => insertImported(t, me));
+    send(res, 201, { tracks: saved.map((i) => toTrack(getTrack(i, me.id), me.id)) });
   });
 
   route('GET', '/api/tracks/:id/stream', async (req, res, p) => {
@@ -267,7 +431,7 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
     else q(`INSERT INTO reactions (user_id, track_id, value, created_at) VALUES (?, ?, ?, ?)
             ON CONFLICT (user_id, track_id) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`)
       .run(me.id, id, value, Date.now());
-    send(res, 200, { track: toTrack(getTrack(id, me.id)) });
+    send(res, 200, { track: toTrack(getTrack(id, me.id), me.id) });
   });
 
   route('POST', '/api/tracks/:id/report', async (req, res, p) => {
@@ -297,7 +461,7 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
     const me = requireUser(req);
     const rows = q(`${TRACK_SELECT} JOIN reactions lr ON lr.track_id = t.id AND lr.user_id = ? AND lr.value = 1
                     ORDER BY lr.created_at DESC`).all(me.id, me.id);
-    send(res, 200, { tracks: rows.map(toTrack) });
+    send(res, 200, { tracks: rows.map((r) => toTrack(r, me?.id ?? 0)) });
   });
 
   route('GET', '/api/users/:name', async (req, res, p) => {
@@ -306,7 +470,7 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
     if (!u) throw new HttpError(404, 'Пользователь не найден');
     const followers = q('SELECT COUNT(*) AS n FROM follows WHERE artist_id = ?').get(u.id).n;
     const following = me ? Boolean(q('SELECT 1 FROM follows WHERE follower_id = ? AND artist_id = ?').get(me.id, u.id)) : false;
-    const tracks = q(`${TRACK_SELECT} WHERE t.user_id = ? ORDER BY t.created_at DESC`).all(me?.id ?? 0, u.id).map(toTrack);
+    const tracks = q(`${TRACK_SELECT} WHERE t.user_id = ? ORDER BY t.created_at DESC`).all(me?.id ?? 0, u.id).map((r) => toTrack(r, me?.id ?? 0));
     send(res, 200, { user: { ...u, followers, following }, tracks });
   });
 
@@ -387,7 +551,7 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
     };
   };
   const hydrate = (me, result) => ({
-    items: result.items.map((it) => ({ track: toTrack(getTrack(it.track.id, me.id)), reasons: it.reasons, score: it.score })),
+    items: result.items.map((it) => ({ track: toTrack(getTrack(it.track.id, me.id), me.id), reasons: it.reasons, score: it.score })),
     profile: result.profile,
   });
 
@@ -450,7 +614,7 @@ export function createApp({ dataDir = path.join(ROOT, 'data') } = {}) {
     const inputs = loadRecoInputs(me, url);
     const ctx = buildContext(inputs);
     const profile = describeProfile(ctx);
-    profile.influences = profile.influences.map((i) => ({ ...i, track: toTrack(getTrack(i.track_id, me.id)) }));
+    profile.influences = profile.influences.map((i) => ({ ...i, track: toTrack(getTrack(i.track_id, me.id), me.id) }));
     // Вкус по времени суток: середины слотов «ночь / утро / день / вечер», будни и выходные
     const now = Date.now();
     profile.bySlot = [];

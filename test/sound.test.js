@@ -70,5 +70,6 @@ test('центр профиля и описание', () => {
     [{ bpm: 160, energy: 0.4, percussive: 0.4, brightness: 0.4, dynamics: 0.4 }, 1]]);
   assert.equal(c.bpm, 113); // среднее в логарифмах: sqrt(80·160)
   assert.equal(c.energy, 0.3);
-  assert.match(describeSound({ bpm: 174, energy: 0.9, percussive: 0.8, brightness: 0.7, dynamics: 0.5 }), /174 BPM, энергично, плотный ритм, ярко/);
+  assert.equal(describeSound({ bpm: 174, energy: 0.9, percussive: 0.8, brightness: 0.7, dynamics: 0.5 }), 'быстро, энергично, с плотным ритмом, ярко');
+  assert.equal(describeSound({ bpm: 72, energy: 0.2, percussive: 0.2, brightness: 0.2, dynamics: 0.5 }), 'неспешно, спокойно, мягко, тепло');
 });
