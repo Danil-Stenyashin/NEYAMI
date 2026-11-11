@@ -131,6 +131,7 @@ const MIGRATIONS = [
   ['tracks', 'license', 'TEXT'],               // ссылка на лицензию (Creative Commons)
   ['tracks', 'added_by', 'INTEGER'],           // кто добавил трек чужого артиста (импорт)
   ['users', 'imported', 'INTEGER NOT NULL DEFAULT 0'], // артист из импорта — войти под ним нельзя
+  ['tracks', 'embed_url', 'TEXT'],             // трек по ссылке: играет официальный плеер SoundCloud / Яндекс Музыки
 ];
 
 export function openDb(file) {

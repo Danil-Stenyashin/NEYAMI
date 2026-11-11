@@ -110,6 +110,7 @@ function sendEvent(type, extra = {}) {
 function leaveCurrent() {
   const c = state.cur;
   if (!c) return { early: false };
+  if (c.track.embed) { closeEmbed(); return { early: false }; }
   let early = false;
   if (!c.outcomeSent && !c.preview && audio.duration > 0) {
     const frac = audio.currentTime / audio.duration;
@@ -128,6 +129,7 @@ function playTrack(item, { startAt = 0, preview = false } = {}) {
   leaveCurrent();
   unlocking = false;
   const { track, reasons = [] } = item;
+  if (track.embed) return playEmbed(item);
   const cur = (state.cur = {
     track, reasons, preview,
     segments: [], seeks: [], segStart: null, lastT: startAt,
@@ -151,6 +153,52 @@ function playTrack(item, { startAt = 0, preview = false } = {}) {
   renderPlayer();
   updateMediaSession(track);
   loadHeat(track);
+}
+
+
+// ---------- Треки по ссылке: официальный плеер SoundCloud / Яндекс Музыки ----------
+const EMBED_NAMES = { soundcloud: 'SoundCloud', yandex: 'Яндекс Музыка' };
+let scApi = null;
+function loadScApi() {
+  if (scApi) return scApi;
+  scApi = new Promise((resolve, reject) => {
+    const el = document.createElement('script');
+    el.src = 'https://w.soundcloud.com/player/api.js';
+    el.onload = () => resolve(window.SC);
+    el.onerror = reject;
+    document.head.append(el);
+  }).catch(() => (scApi = null));
+  return scApi;
+}
+
+function playEmbed(item) {
+  const { track, reasons = [] } = item;
+  audio.pause();
+  audio.removeAttribute('src');
+  state.cur = { track, reasons, preview: false, segments: [], seeks: [], segStart: null, lastT: 0, outcomeSent: true, embed: true };
+  sendEvent('play');
+  const frame = $('#embed-frame');
+  frame.src = track.embed;
+  frame.className = track.source;
+  $('#embed-label').textContent = `Играет через ${EMBED_NAMES[track.source] ?? 'сервис'}${track.source === 'yandex' ? ' — нажмите ▶ в плеере' : ''}`;
+  $('#embed-open').href = track.source_url ?? track.embed;
+  $('#embed').classList.remove('hidden');
+  document.body.classList.add('embed-open');
+  renderPlayer();
+  // SoundCloud сообщает, когда трек доиграл, — тогда включаем следующий
+  if (track.source === 'soundcloud') {
+    loadScApi()?.then((SC) => {
+      if (!SC || state.cur?.track.id !== track.id) return;
+      const w = SC.Widget(frame);
+      w.bind(SC.Widget.Events.FINISH, () => { if (state.cur?.track.id === track.id) next(); });
+    });
+  }
+}
+
+function closeEmbed() {
+  $('#embed-frame').src = 'about:blank';
+  $('#embed').classList.add('hidden');
+  document.body.classList.remove('embed-open');
 }
 
 // ---------- iPhone: «разблокировка» звука первым касанием ----------
@@ -305,6 +353,10 @@ async function startWave() {
   state.mode = 'wave';
   state.queue = [];
   await refillWave();
+  // Начинаем с трека, который NEYAMI играет сама: трек по ссылке (Яндекс) может требовать ручного ▶,
+  // и нажатие «Включить мою волну» выглядело бы как «ничего не произошло»
+  const playable = state.queue.findIndex((i) => !i.track.embed);
+  if (playable > 0) state.queue.unshift(...state.queue.splice(playable, 1));
   next();
 }
 
@@ -325,6 +377,7 @@ function renderPlayer() {
   $('#p-like').classList.toggle('active', t.my_reaction > 0);
   $('#p-reasons').textContent = c.reasons.length ? 'Почему этот трек: ' + c.reasons.join(' · ') : '';
   $('#p-drop').title = `К лучшему моменту (${fmt(t.moment.start)})`;
+  $('#player').classList.toggle('is-embed', Boolean(t.embed));
   if (!$('#full').classList.contains('hidden')) renderFull();
 }
 
@@ -442,12 +495,13 @@ function trackRow(item, idx) {
         <a href="#/u/${encodeURIComponent(t.artist.username)}">${esc(t.artist.username)}</a>
         <span>${fmt(t.duration)}</span>
         <span class="stat" title="Лайки">${icon('heart', 12)}${t.likes}</span>
+        ${t.embed ? `<span class="badge-src">${EMBED_NAMES[t.source] ?? 'по ссылке'}</span>` : ''}
         ${t.tags.map((g) => `<a class="chip tag" href="#/tag/${encodeURIComponent(g)}">#${esc(g)}</a>`).join('')}
       </div>
       ${item.reasons?.length ? `<div class="why" title="${esc(item.reasons.join(' · '))}">${esc(item.reasons[0])}</div>` : ''}
     </div>
     <div class="actions">
-      <button data-act="drop" class="icon-btn opt" title="С лучшего момента (${fmt(t.moment.start)})">${icon('target')}</button>
+      ${t.embed ? '' : `<button data-act="drop" class="icon-btn opt" title="С лучшего момента (${fmt(t.moment.start)})">${icon('target')}</button>`}
       <button data-act="like" class="icon-btn ${liked ? 'active' : ''}" title="Нравится">${icon(liked ? 'heartFill' : 'heart')}</button>
       ${isMine
         ? `<button data-act="delete" class="icon-btn opt" title="Удалить">${icon('trash')}</button>`
@@ -709,12 +763,15 @@ async function previewNext(outcome) {
     }).catch(() => {});
   }
   preview.item = null;
-  if (!preview.items.length) {
+  for (let attempt = 0; attempt < 2 && !preview.items.filter((i) => !i.track.embed).length; attempt++) {
+    // Каталог маленький и всё уже показано — начинаем новый круг, как волна
+    if (attempt === 1) state.seen = new Set();
     const exclude = [...state.seen].slice(-300).join(',');
     const data = await api(`/api/wave?count=10&tz=${TZ}&exclude=${exclude}`).catch((e) => (toast(e.message), { items: [] }));
     data.items.forEach((i) => state.seen.add(i.track.id));
     preview.items = data.items;
   }
+  while (preview.items[0]?.track.embed) preview.items.shift();
   const item = (preview.item = preview.items.shift());
   const box = $('#quick');
   if (!box) return;
@@ -970,7 +1027,7 @@ async function analyzeAudio(file) {
 let vizRaf = 0;
 
 function openFull() {
-  if (!state.cur) return;
+  if (!state.cur || state.cur.track.embed) return;
   // На компьютере визуализация слушает настоящий звук. На iPhone — спокойная анимация:
   // подключение Web Audio там может останавливать музыку при блокировке экрана.
   if (!isIOS() && ensureGraph(audio)) applyEq(loadEq());
@@ -1127,6 +1184,7 @@ const ADD_TABS = [
   ['archive', 'Свободная музыка'],
   ['jamendo', 'Jamendo'],
   ['folder', 'Своя папка'],
+  ['link', 'По ссылке'],
   ['single', 'Свой трек'],
 ];
 
@@ -1142,6 +1200,7 @@ async function renderUpload(tab) {
   if (current === 'archive') renderArchivePane(pane);
   else if (current === 'jamendo') renderJamendoPane(pane);
   else if (current === 'folder') renderFolderPane(pane);
+  else if (current === 'link') renderLinkPane(pane);
   else renderSingleUpload(pane);
 }
 
@@ -1291,6 +1350,49 @@ async function renderJamendoPane(pane) {
       b.textContent = 'Добавлено';
       queueAnalysis(tracks);
     } catch (er) { b.disabled = false; b.textContent = 'Добавить'; toast(er.message); }
+  };
+}
+
+function renderLinkPane(pane) {
+  pane.innerHTML = `
+    <p class="muted">Вставьте ссылку на трек в SoundCloud или Яндекс Музыке. Он будет играть через официальный плеер сервиса —
+      со всеми правами артистов. Волна учтёт его, а лайки и пропуски будут работать как обычно.</p>
+    <form id="link-form" class="form">
+      <label>Ссылка на трек<input type="text" name="url" placeholder="https://soundcloud.com/… или https://music.yandex.ru/album/…/track/…" required></label>
+      <div id="link-extra" class="hidden">
+        <label>Название<input type="text" name="title" maxlength="200"></label>
+        <label>Артист<input type="text" name="artist" maxlength="100"></label>
+      </div>
+      <label>Теги — жанр и настроение, чтобы волна знала, куда его поставить<input type="text" name="tags" placeholder="synthwave, ночь"></label>
+      <div class="muted" id="link-status"></div>
+      <button class="primary">Добавить</button>
+    </form>
+    <p class="muted small">Ограничения: эквалайзер, анализ звука и «лучший момент» для таких треков недоступны — их звук остаётся у сервиса.
+      Яндекс Музыка может играть только 30 секунд, если вы не вошли в неё в этом браузере.</p>`;
+  const form = $('#link-form');
+  const extra = $('#link-extra');
+  form.url.oninput = () => {
+    // Для Яндекса название и артиста узнать неоткуда — просим ввести
+    extra.classList.toggle('hidden', !/music\.yandex\./.test(form.url.value));
+  };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const status = $('#link-status');
+    status.textContent = 'Добавляю…';
+    try {
+      const { track, existed } = await api('/api/tracks/link', {
+        method: 'POST',
+        body: { url: form.url.value, title: form.title.value, artist: form.artist.value, tags: form.tags.value },
+      });
+      status.innerHTML = `${existed ? 'Этот трек уже есть' : 'Добавлено'}: <b>${esc(track.title)}</b> — ${esc(track.artist.username)}.
+        <a href="#" id="link-play">Послушать</a>`;
+      $('#link-play').onclick = (ev) => { ev.preventDefault(); state.mode = 'list'; state.queue = []; playTrack({ track }); };
+      form.reset();
+      extra.classList.add('hidden');
+    } catch (er) {
+      status.textContent = er.message;
+      if (/название|артист/i.test(er.message)) extra.classList.remove('hidden');
+    }
   };
 }
 

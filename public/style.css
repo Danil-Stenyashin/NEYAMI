@@ -391,3 +391,22 @@ body.full-open { overflow: hidden; }
   .album img { width: 48px; height: 48px; }
   .album button { grid-column: 1 / -1; }
 }
+
+/* ---------- трек по ссылке ---------- */
+.embed {
+  position: fixed; right: 16px; bottom: calc(118px + env(safe-area-inset-bottom)); z-index: 25;
+  width: min(420px, calc(100vw - 32px)); background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden;
+}
+.embed-head { display: flex; justify-content: space-between; gap: 10px; padding: 8px 12px; font-size: 12px; }
+.embed-head a { color: var(--accent); white-space: nowrap; }
+.embed iframe { display: block; width: 100%; border: 0; height: 166px; }
+.embed iframe.yandex { height: 100px; }
+body.embed-open .main { padding-bottom: calc(320px + env(safe-area-inset-bottom)); }
+.player.is-embed .p-progress, .player.is-embed #p-drop, .player.is-embed #p-toggle { visibility: hidden; }
+.badge-src { font-size: 11px; padding: 0 6px; border-radius: 4px; background: var(--surface-2); color: var(--muted); }
+#link-extra { display: grid; gap: 16px; }
+#link-extra.hidden { display: none; }
+@media (max-width: 760px) {
+  .embed { right: 16px; left: 16px; width: auto; bottom: calc(132px + env(safe-area-inset-bottom)); }
+}

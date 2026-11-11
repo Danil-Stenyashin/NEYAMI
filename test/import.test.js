@@ -50,6 +50,12 @@ async function fakeFetch(url) {
       musicinfo: { tags: { genres: ['ambient'], vartags: ['calm'] } },
     }] });
   }
+  if (u.hostname === 'soundcloud.com' && u.pathname === '/oembed') {
+    const page = u.searchParams.get('url');
+    if (page.endsWith('/missing')) return new Response('not found', { status: 404 });
+    return json({ title: 'Night Drive by Ночной Пилот', author_name: 'Ночной Пилот', thumbnail_url: 'https://i1.sndcdn.com/artworks-abc-large.jpg' });
+  }
+  if (u.hostname.endsWith('sndcdn.com')) return file(JPG, 'image/jpeg', url);
   if (u.hostname.endsWith('jamendo.com')) return file(u.pathname.endsWith('.jpg') ? JPG : MP3, u.pathname.endsWith('.jpg') ? 'image/jpeg' : 'audio/mpeg', url);
   throw new Error(`неожиданный запрос: ${url}`);
 }
@@ -170,4 +176,43 @@ test('у трека без своей обложки — сгенерирова�
   assert.equal(folder.data.track.artist.username, 'Луна');
   assert.equal(folder.data.track.source, 'folder');
   assert.ok(folder.data.track.can_edit);
+});
+
+import { parseLink } from '../src/links.js';
+
+test('ссылки: только треки SoundCloud и Яндекс Музыки, адрес плеера собирается сам', () => {
+  const sc = parseLink('https://soundcloud.com/night-pilot/night-drive?si=123&utm_source=x');
+  assert.equal(sc.service, 'soundcloud');
+  assert.equal(sc.page, 'https://soundcloud.com/night-pilot/night-drive');
+  assert.ok(sc.embed.startsWith('https://w.soundcloud.com/player/?url=https%3A%2F%2Fsoundcloud.com%2Fnight-pilot%2Fnight-drive'));
+  const ya = parseLink('https://music.yandex.ru/album/123/track/456');
+  assert.equal(ya.embed, 'https://music.yandex.ru/iframe/track/456/123');
+  assert.throws(() => parseLink('https://soundcloud.com/night-pilot/sets/album'), /отдельный трек/);
+  assert.throws(() => parseLink('https://music.yandex.ru/artist/1'), /album/);
+  assert.throws(() => parseLink('https://evil.example/soundcloud.com/a/b'), /SoundCloud и Яндекс/);
+  assert.throws(() => parseLink('javascript:alert(1)'), /https/);
+});
+
+test('трек по ссылке: SoundCloud подставляет название и обложку, Яндекс просит ввести; звук не хранится', async () => {
+  const me = client();
+  await me('/api/register', { method: 'POST', json: { username: 'linker', password: 'password1' } });
+  const sc = await me('/api/tracks/link', { method: 'POST', json: { url: 'https://soundcloud.com/night-pilot/night-drive', tags: 'synthwave' } });
+  assert.equal(sc.status, 201);
+  assert.equal(sc.data.track.title, 'Night Drive');
+  assert.equal(sc.data.track.artist.username, 'Ночной Пилот');
+  assert.equal(sc.data.track.source, 'soundcloud');
+  assert.match(sc.data.track.embed, /^https:\/\/w\.soundcloud\.com\/player\//);
+  assert.equal((await me(sc.data.track.cover)).type, 'image/jpeg');
+  assert.equal((await me(`/api/tracks/${sc.data.track.id}/stream`)).status, 404);
+  // повторная ссылка не плодит дубликаты
+  const again = await me('/api/tracks/link', { method: 'POST', json: { url: 'https://soundcloud.com/night-pilot/night-drive' } });
+  assert.equal(again.data.track.id, sc.data.track.id);
+  assert.equal((await me('/api/tracks/link', { method: 'POST', json: { url: 'https://soundcloud.com/night-pilot/missing' } })).status, 400);
+
+  const noTitle = await me('/api/tracks/link', { method: 'POST', json: { url: 'https://music.yandex.ru/album/1/track/2' } });
+  assert.equal(noTitle.status, 400);
+  const ya = await me('/api/tracks/link', { method: 'POST', json: { url: 'https://music.yandex.ru/album/1/track/2', title: 'Песня', artist: 'Исполнитель' } });
+  assert.equal(ya.status, 201);
+  assert.equal(ya.data.track.embed, 'https://music.yandex.ru/iframe/track/2/1');
+  assert.equal((await me(`/api/tracks/${ya.data.track.id}`, { method: 'DELETE' })).status, 200);
 });

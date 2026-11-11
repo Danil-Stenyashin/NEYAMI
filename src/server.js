@@ -10,6 +10,7 @@ import { sanitizeFeatures, describeSound } from './sound.js';
 import { BINS, bestMoment, segmentsToBins, seekBin } from './moments.js';
 import { archiveSearch, archiveItem, archiveFetchTracks, jamendoSearch, jamendoFetchTracks, ImportError } from './importers.js';
 import { coverSvg } from './covers.js';
+import { parseLink, soundcloudInfo } from './links.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -104,7 +105,7 @@ export function createApp({ dataDir = path.join(ROOT, 'data'), fetchImpl = globa
 
   const TRACK_SELECT = `
     SELECT t.id, t.user_id, t.title, t.description, t.tags, t.explicit, t.duration, t.energy_peak, t.features, t.created_at,
-           t.cover, t.source, t.source_url, t.license, t.added_by,
+           t.cover, t.source, t.source_url, t.license, t.added_by, t.embed_url,
            u.username AS artist, u.imported AS artist_imported,
            (SELECT COUNT(*) FROM reactions r WHERE r.track_id = t.id AND r.value = 1) AS likes,
            (SELECT COUNT(*) FROM events e WHERE e.track_id = t.id AND e.type = 'play') AS plays,
@@ -122,6 +123,7 @@ export function createApp({ dataDir = path.join(ROOT, 'data'), fetchImpl = globa
     moment: bestMoment(loadHeat(r.id), r.duration, r.energy_peak),
     cover: `/api/tracks/${r.id}/cover${r.cover ? `?v=${r.cover.slice(0, 8)}` : ''}`,
     source: r.source ?? 'upload', source_url: r.source_url ?? null, license: r.license ?? null,
+    embed: r.embed_url ?? null, // трек по ссылке — играет официальный плеер сервиса
     can_edit: Boolean(viewerId) && (r.user_id === viewerId || r.added_by === viewerId),
     id: r.id, title: r.title, description: r.description, tags: decodeTags(r.tags),
     explicit: Boolean(r.explicit), duration: r.duration, created_at: r.created_at,
@@ -299,7 +301,7 @@ export function createApp({ dataDir = path.join(ROOT, 'data'), fetchImpl = globa
     const me = requireUser(req);
     const row = canEdit(Number(p.id), me);
     q('DELETE FROM tracks WHERE id = ?').run(Number(p.id));
-    fs.rm(path.join(uploadsDir, row.file), { force: true }, () => {});
+    if (row.file) fs.rm(path.join(uploadsDir, row.file), { force: true }, () => {});
     if (row.cover) fs.rm(path.join(uploadsDir, row.cover), { force: true }, () => {});
     send(res, 200, { ok: true });
   });
@@ -365,6 +367,29 @@ export function createApp({ dataDir = path.join(ROOT, 'data'), fetchImpl = globa
     send(res, 200, { jamendo: Boolean(key) });
   });
 
+  // Трек по ссылке (SoundCloud / Яндекс Музыка): сохраняем только ссылку и описание, звук не храним
+  route('POST', '/api/tracks/link', async (req, res) => {
+    const me = requireUser(req);
+    const body = await readJson(req);
+    const link = (() => { try { return parseLink(body.url); } catch (e) { return importErr(e); } })();
+    const dupe = q('SELECT id FROM tracks WHERE embed_url = ?').get(link.embed);
+    if (dupe) return send(res, 200, { track: toTrack(getTrack(dupe.id, me.id), me.id), existed: true });
+    let info = { title: '', artist: '', cover: null };
+    if (link.service === 'soundcloud') info = await soundcloudInfo(fetchImpl, link.page).catch(importErr);
+    const title = String(body.title ?? '').trim().slice(0, 200) || info.title;
+    const artist = String(body.artist ?? '').trim().slice(0, 100) || info.artist;
+    if (!title) throw new HttpError(400, 'Укажите название трека');
+    if (!artist) throw new HttpError(400, 'Укажите артиста');
+    const artistId = resolveArtist(artist, me);
+    const cover = info.cover ? saveCover(info.cover.buf, info.cover.type) : null;
+    const service = link.service === 'soundcloud' ? 'SoundCloud' : 'Яндекс Музыки';
+    const { lastInsertRowid } = q(`INSERT INTO tracks (user_id, title, description, tags, explicit, file, mime, size, cover, source,
+        source_url, embed_url, added_by, created_at) VALUES (?, ?, ?, ?, 0, '', 'text/html', 0, ?, ?, ?, ?, ?, ?)`).run(
+      artistId, title, `Играет через официальный плеер ${service}.`, encodeTags(parseTags(body.tags)), cover,
+      link.service, link.page, link.embed, artistId === me.id ? null : me.id, Date.now());
+    send(res, 201, { track: toTrack(getTrack(Number(lastInsertRowid), me.id), me.id) });
+  });
+
   route('GET', '/api/import/archive', async (req, res, _p, url) => {
     requireUser(req);
     const items = await archiveSearch(fetchImpl, url.searchParams.get('q')).catch(importErr);
@@ -399,6 +424,7 @@ export function createApp({ dataDir = path.join(ROOT, 'data'), fetchImpl = globa
   route('GET', '/api/tracks/:id/stream', async (req, res, p) => {
     const row = q('SELECT file, mime FROM tracks WHERE id = ?').get(Number(p.id));
     if (!row) throw new HttpError(404, 'Трек не найден');
+    if (!row.file) throw new HttpError(404, 'Этот трек играет через плеер SoundCloud или Яндекс Музыки');
     const filePath = path.join(uploadsDir, row.file);
     const { size } = fs.statSync(filePath);
     const base = { 'Content-Type': row.mime, 'Accept-Ranges': 'bytes', 'X-Content-Type-Options': 'nosniff',
