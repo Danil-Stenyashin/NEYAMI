@@ -68,6 +68,7 @@ jobs:
           $report | Format-List | Out-String | Write-Host
           if ($report.brand -ne 'neyami') { throw 'Интерфейс не отрисовался' }
           if ($report.tracks -lt 20) { throw 'Демо-каталог не создан' }
+          if (-not ("$($report.archive)".StartsWith('ok'))) { throw "Импорт из Internet Archive не работает: $($report.archive)" }
 
           $db = Join-Path $env:APPDATA 'NEYAMI\data\neyami.db'
           Write-Host ("База данных: {0}, {1:N0} КБ" -f $db, ((Get-Item $db).Length / 1KB))

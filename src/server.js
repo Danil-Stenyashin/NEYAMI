@@ -11,6 +11,7 @@ import { BINS, bestMoment, segmentsToBins, seekBin } from './moments.js';
 import { archiveSearch, archiveItem, archiveFetchTracks, jamendoSearch, jamendoFetchTracks, ImportError } from './importers.js';
 import { coverSvg } from './covers.js';
 import { parseLink, soundcloudInfo } from './links.js';
+import { DEMO_DESCRIPTION } from './demo.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -174,6 +175,22 @@ export function createApp({ dataDir = path.join(ROOT, 'data'), fetchImpl = globa
     return Number(lastInsertRowid);
   };
 
+  /**
+   * Синтезированные демо-треки нужны, только пока нет настоящей музыки.
+   * Как только её набирается достаточно — убираем их, чтобы не мешали волне.
+   */
+  const DEMO_LIMIT = 10;
+  const cleanupDemo = () => {
+    const real = q('SELECT COUNT(*) AS n FROM tracks WHERE description != ?').get(DEMO_DESCRIPTION).n;
+    if (real < DEMO_LIMIT) return 0;
+    const demo = q('SELECT id, file, cover FROM tracks WHERE description = ?').all(DEMO_DESCRIPTION);
+    for (const t of demo) {
+      q('DELETE FROM tracks WHERE id = ?').run(t.id);
+      if (t.file) fs.rm(path.join(uploadsDir, t.file), { force: true }, () => {});
+    }
+    return demo.length;
+  };
+
   const canEdit = (trackId, me) => {
     const row = q('SELECT user_id, added_by, file, cover FROM tracks WHERE id = ?').get(trackId);
     if (!row) throw new HttpError(404, 'Трек не найден');
@@ -294,6 +311,7 @@ export function createApp({ dataDir = path.join(ROOT, 'data'), fetchImpl = globa
       Number.isFinite(peak) && peak >= 0 ? peak : null, features ? JSON.stringify(features) : null,
       source, artistId === me.id ? null : me.id, Date.now(),
     );
+    cleanupDemo();
     send(res, 201, { track: toTrack(getTrack(Number(lastInsertRowid), me.id), me.id) });
   });
 
@@ -350,7 +368,9 @@ export function createApp({ dataDir = path.join(ROOT, 'data'), fetchImpl = globa
   const importErr = (e) => {
     if (e instanceof ImportError) throw new HttpError(400, e.message);
     if (e instanceof HttpError) throw e;
-    throw new HttpError(502, 'Источник недоступен — проверьте интернет и попробуйте ещё раз');
+    console.error('Импорт:', e);
+    const why = e?.cause?.code || e?.cause?.message || e?.message || 'неизвестная ошибка';
+    throw new HttpError(502, `Не удалось связаться с источником (${String(why).slice(0, 120)}). Проверьте интернет и попробуйте ещё раз`);
   };
   const jamendoKey = () => q("SELECT value FROM app_settings WHERE key = 'jamendo_key'").get()?.value ?? process.env.JAMENDO_KEY ?? '';
 
@@ -407,6 +427,7 @@ export function createApp({ dataDir = path.join(ROOT, 'data'), fetchImpl = globa
       limit: Math.min(12, Math.max(1, Number(limit) || 6)),
     }).catch(importErr);
     const ids = list.map((t) => insertImported(t, me));
+    cleanupDemo();
     send(res, 201, { tracks: ids.map((i) => toTrack(getTrack(i, me.id), me.id)) });
   });
   route('GET', '/api/import/jamendo', async (req, res, _p, url) => {
@@ -418,6 +439,7 @@ export function createApp({ dataDir = path.join(ROOT, 'data'), fetchImpl = globa
     const { ids } = await readJson(req);
     const list = await jamendoFetchTracks(fetchImpl, jamendoKey(), ids).catch(importErr);
     const saved = list.map((t) => insertImported(t, me));
+    cleanupDemo();
     send(res, 201, { tracks: saved.map((i) => toTrack(getTrack(i, me.id), me.id)) });
   });
 

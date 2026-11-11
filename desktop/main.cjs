@@ -1,6 +1,6 @@
 // NEYAMI — настольное приложение (Windows, а также macOS и Linux).
 // Внутри — тот же сервер NEYAMI, окно приложения и значок в трее. Node.js ставить не нужно.
-const { app, BrowserWindow, Tray, Menu, shell, clipboard, nativeImage, nativeTheme, Notification } = require('electron');
+const { app, BrowserWindow, Tray, Menu, shell, clipboard, nativeImage, nativeTheme, Notification, net: electronNet } = require('electron');
 const fs = require('node:fs');
 const net = require('node:net');
 const os = require('node:os');
@@ -64,13 +64,17 @@ const phoneUrl = () => {
 
 async function start() {
   const dataDir = path.join(app.getPath('userData'), 'data');
-  // При первом запуске — демо-каталог, чтобы было что послушать сразу
-  const { seedDemo } = await import(pathToFileURL(path.join(ROOT, 'src', 'demo.js')).href);
-  seedDemo({ dataDir });
+  // Синтезированный демо-каталог — только для самопроверки при сборке. Настоящие пользователи
+  // начинают с кнопки «Собрать музыку» (свободная музыка из Internet Archive).
+  if (process.env.NEYAMI_SMOKE) {
+    const { seedDemo } = await import(pathToFileURL(path.join(ROOT, 'src', 'demo.js')).href);
+    seedDemo({ dataDir });
+  }
 
   const { createApp } = await import(pathToFileURL(path.join(ROOT, 'src', 'server.js')).href);
   port = await findPort();
-  server = createApp({ dataDir });
+  // Сеть — через Chromium (net.fetch): системный прокси и сертификаты Windows, как в браузере
+  server = createApp({ dataDir, fetchImpl: (url, opts) => electronNet.fetch(url, opts) });
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, () => { port = server.address().port; resolve(); });
@@ -130,8 +134,30 @@ function createWindow() {
         let audio = 'ok';
         try { await a.play(); await new Promise((r) => setTimeout(r, 1500)); audio = 'играет, t=' + a.currentTime.toFixed(1); a.pause(); }
         catch (e) { audio = 'ошибка: ' + e.message; }
+        // Настоящий импорт свободной музыки через сеть Windows: поиск, описание альбома, скачивание
+        let archive = 'не проверялся';
+        try {
+          await fetch('/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: 'smoke' + Date.now().toString().slice(-6), password: 'password1' }) });
+          const found = await (await fetch('/api/import/archive?q=jazz')).json();
+          if (!found.items?.length) throw new Error(found.error || 'поиск ничего не нашёл');
+          let last = '';
+          for (const it of found.items.slice(0, 4)) {
+            const r = await fetch('/api/import/archive', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: it.id, limit: 1 }) });
+            const d = await r.json();
+            if (r.ok) {
+              const t = d.tracks[0];
+              const head = await fetch('/api/tracks/' + t.id + '/stream', { headers: { Range: 'bytes=0-15' } });
+              archive = 'ok: «' + t.title + '» — ' + t.artist.username + ', стрим ' + head.status;
+              last = '';
+              break;
+            }
+            last = d.error;
+          }
+          if (last) archive = 'ошибка: ' + last;
+        } catch (e) { archive = 'ошибка: ' + e.message; }
         return { brand: document.querySelector('.brand')?.textContent.trim(), tags: tags.tags.length, tracks: tracks.tracks.length,
-                 duration: a.duration, audio };
+                 duration: a.duration, audio, archive };
       })()`).catch((e) => ({ error: String(e) }));
       fs.writeFileSync(`${out}.json`, JSON.stringify({ port, platform: process.platform, electron: process.versions.electron, ...report }, null, 2));
       console.log('NEYAMI smoke:', JSON.stringify(report));

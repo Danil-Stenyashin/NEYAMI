@@ -9,7 +9,10 @@
 
 const IA = 'https://archive.org';
 const JAMENDO = 'https://api.jamendo.com/v3.0';
-const MAX_AUDIO = 60 * 1024 * 1024;
+const MAX_AUDIO = 40 * 1024 * 1024;
+// Обычные песни, а не часовые миксы и записи эфиров
+const MIN_TRACK_SEC = 60;
+const MAX_TRACK_SEC = 15 * 60;
 const MAX_IMAGE = 5 * 1024 * 1024;
 const ID_RE = /^[A-Za-z0-9._-]{1,100}$/;
 
@@ -60,16 +63,19 @@ const splitSubjects = (s) => (Array.isArray(s) ? s : String(s ?? '').split(/[;,]
 
 // ---------------- Internet Archive ----------------
 
-/** Поиск альбомов/подборок под свободной лицензией. */
+/**
+ * Поиск альбомов под свободной лицензией. Ищем в коллекции netlabels — это только музыка
+ * независимых лейблов (в общем «аудио» Internet Archive много аудиокниг, лекций и эфиров).
+ */
 export async function archiveSearch(fetchImpl, query, { rows = 24 } = {}) {
   const q = String(query ?? '').replace(/[^\p{L}\p{N}\s-]/gu, ' ').trim().slice(0, 80);
   if (!q) return [];
   const params = new URLSearchParams({
-    q: `(${q}) AND mediatype:(audio) AND licenseurl:(*creativecommons* OR *publicdomain*)`,
+    q: `(${q}) AND collection:(netlabels) AND mediatype:(audio) AND licenseurl:(*creativecommons* OR *publicdomain*)`,
     rows: String(rows),
     output: 'json',
-    sort: 'downloads desc',
   });
+  params.append('sort[]', 'downloads desc');
   for (const f of ['identifier', 'title', 'creator', 'licenseurl', 'subject', 'year']) params.append('fl[]', f);
   const data = await getJson(fetchImpl, `${IA}/advancedsearch.php?${params}`);
   return (data?.response?.docs ?? [])
@@ -128,8 +134,10 @@ export async function archiveFetchTracks(fetchImpl, id, { files = null, limit = 
   if (!item.license) throw new ImportError('У этой записи нет свободной лицензии');
   let chosen = item.tracks;
   if (Array.isArray(files) && files.length) chosen = chosen.filter((t) => files.includes(t.file));
-  chosen = chosen.filter((t) => !t.size || t.size <= MAX_AUDIO).slice(0, limit);
-  if (!chosen.length) throw new ImportError('В записи нет подходящих mp3');
+  chosen = chosen
+    .filter((t) => (!t.size || t.size <= MAX_AUDIO) && (!t.duration || (t.duration >= MIN_TRACK_SEC && t.duration <= MAX_TRACK_SEC)))
+    .slice(0, limit);
+  if (!chosen.length) throw new ImportError('В этом альбоме нет обычных треков (только длинные миксы или нет mp3)');
   const cover = await download(fetchImpl, item.cover, { hosts: IA_HOSTS, max: MAX_IMAGE, kind: 'image' }).catch(() => null);
   const out = [];
   for (const t of chosen) {

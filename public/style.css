@@ -410,3 +410,9 @@ body.embed-open .main { padding-bottom: calc(320px + env(safe-area-inset-bottom)
 @media (max-width: 760px) {
   .embed { right: 16px; left: 16px; width: auto; bottom: calc(132px + env(safe-area-inset-bottom)); }
 }
+
+.onboard { margin-top: 28px; }
+.onboard-title { font-family: var(--serif); font-size: 21px; margin-bottom: 6px; }
+.onboard p { margin: 0 0 16px; }
+.onboard a, #starter-status a { color: var(--accent); }
+.onboard-status, #starter-status { margin-top: 14px; font-size: 14px; line-height: 1.7; }

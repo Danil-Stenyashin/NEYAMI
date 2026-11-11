@@ -9,6 +9,9 @@ import { hashPassword } from './auth.js';
 import { BINS } from './moments.js';
 import { extractFeatures } from '../public/audio-features.js';
 
+// По этому описанию демо-треки узнаются и удаляются, когда появляется настоящая музыка
+export const DEMO_DESCRIPTION = 'Синтезированный демо-трек.';
+
 /**
  * Заполняет пустую базу демо-данными. Если треки уже есть — ничего не делает.
  * @returns {{skipped: true} | {artists: number, tracks: number, listeners: number}}
@@ -100,7 +103,7 @@ export function seedDemo({ dataDir }) {
       const tags = [...new Set([...a.tags, ...extra])];
       const explicit = tags.includes('explicit') ? 1 : 0;
       const age = Math.floor(rand() * 40) * 24 * 3600 * 1000;
-      const id = Number(insTrack.run(uid, title, 'Синтезированный демо-трек.', encodeTags(tags.filter((t) => t !== 'explicit')),
+      const id = Number(insTrack.run(uid, title, DEMO_DESCRIPTION, encodeTags(tags.filter((t) => t !== 'explicit')),
         explicit, file, buf.length, DUR, dropAt, JSON.stringify(features), now - age).lastInsertRowid);
       tracks.push({ id, tags, dropAt, artist: a.name, features });
     });

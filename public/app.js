@@ -629,7 +629,8 @@ async function renderWave() {
   if (!state.settings) state.settings = (await api('/api/wave/settings')).settings;
   const s = state.settings;
   const [{ tags }, { tracks: some }] = await Promise.all([api('/api/tags'), api('/api/tracks?limit=40')]);
-  const fewTracks = some.length < 30;
+  const realTracks = some.filter((t) => t.description !== 'Синтезированный демо-трек.').length;
+  const fewTracks = realTracks < 10;
   view.innerHTML = `
     <section class="hero">
       <h1>${greeting()}, ${esc(state.me.username)}</h1>
@@ -639,10 +640,13 @@ async function renderWave() {
       <div id="context-line" class="ctx-line"></div>
     </section>
     ${fewTracks ? `
-    <a class="card hint" href="#/upload">
-      <span>Музыки пока немного — волне не из чего выбирать. Добавим свободной музыки или вашей из папки?</span>
-      <span class="hint-go">Добавить музыку →</span>
-    </a>` : ''}
+    <section class="card onboard">
+      <div class="onboard-title">Давайте наполним NEYAMI музыкой</div>
+      <p class="muted">Соберу около 25 треков восьми жанров — свободная музыка независимых артистов из Internet Archive.
+        Займёт минуту-две. Или <a href="#/upload/folder">добавьте свою папку</a>.</p>
+      <button class="primary" id="onboard-go">Собрать музыку</button>
+      <div id="onboard-status" class="onboard-status"></div>
+    </section>` : ''}
 
     <section class="tune">
       <div class="slider">
@@ -671,6 +675,10 @@ async function renderWave() {
     <div id="queue"></div>`;
 
   $('#wave-start').onclick = startWave;
+  $('#onboard-go')?.addEventListener('click', async (e) => {
+    const n = await runStarter(e.target.closest('button'), $('#onboard-status'));
+    if (n) { state.profile = null; toast(`Добавлено ${n} треков — можно включать волну`); }
+  });
   $('#discovery').oninput = (e) => saveSettings({ discovery: e.target.value / 100 });
   $('#underground').oninput = (e) => saveSettings({ underground: e.target.value / 100 });
   $('#b-go').onclick = startBridge;
@@ -1262,27 +1270,47 @@ function renderArchivePane(pane) {
     const b = e.target.closest('[data-ia]');
     if (b) add(b.dataset.ia, b);
   };
-  $('#starter').onclick = async (e) => {
-    const btn = e.target.closest('button');
-    btn.disabled = true;
-    const status = $('#starter-status');
-    let total = 0;
-    for (const [ru, q] of STARTER) {
-      status.textContent = `Ищу ${ru}… (добавлено ${total})`;
-      try {
-        const { items } = await api(`/api/import/archive?q=${encodeURIComponent(q)}`);
-        for (const it of items.slice(0, 3)) {
-          const fake = document.createElement('button');
-          const n = await add(it.id, fake, 3);
-          if (n) { total += n; break; }
-        }
-      } catch { /* жанр не нашёлся — идём дальше */ }
+  $('#starter').onclick = (e) => runStarter(e.target.closest('button'), $('#starter-status'));
+}
+
+/**
+ * Стартовая подборка: по каждому жанру ищем альбомы и берём первый, где есть обычные треки.
+ * Пишем, что получилось по каждому жанру, — если что-то не так, это сразу видно.
+ */
+async function runStarter(btn, status) {
+  btn.disabled = true;
+  const label = btn.textContent;
+  let total = 0;
+  const report = [];
+  let lastError = '';
+  for (const [ru, q] of STARTER) {
+    btn.textContent = `Собираю: ${ru}…`;
+    status.innerHTML = `${report.join('<br>')}${report.length ? '<br>' : ''}<span class="muted">Ищу ${ru}…</span>`;
+    let added = 0;
+    try {
+      const { items } = await api(`/api/import/archive?q=${encodeURIComponent(q)}`);
+      for (const it of items.slice(0, 4)) {
+        try {
+          const { tracks } = await api('/api/import/archive', { method: 'POST', body: { id: it.id, limit: 3 } });
+          added = tracks.length;
+          queueAnalysis(tracks);
+          report.push(`${ru}: ${added} — «${esc(it.title)}», ${esc(it.artist)}`);
+          break;
+        } catch (er) { lastError = er.message; }
+      }
+      if (!added) report.push(`<span class="muted">${ru}: не нашлось подходящего альбома</span>`);
+    } catch (er) {
+      lastError = er.message;
+      report.push(`<span class="muted">${ru}: ${esc(er.message)}</span>`);
     }
-    status.innerHTML = total
-      ? `Готово: добавлено ${total} треков. <a href="#/wave">Включить волну</a>`
-      : 'Не получилось связаться с Internet Archive. Проверьте интернет и попробуйте ещё раз.';
-    btn.disabled = false;
-  };
+    total += added;
+  }
+  status.innerHTML = `${report.join('<br>')}<br><br>${total
+    ? `<b>Готово: добавлено ${total} треков.</b> <a href="#/wave">Включить волну</a>`
+    : `<b>Ничего не добавилось.</b> ${esc(lastError || 'Проверьте интернет и попробуйте ещё раз.')}`}`;
+  btn.disabled = false;
+  btn.textContent = label;
+  return total;
 }
 
 async function renderJamendoPane(pane) {
