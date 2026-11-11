@@ -16,6 +16,8 @@ let tray = null;
 let server = null;
 let port = 3000;
 let quitting = false;
+let update = null; // { version, url } — если на GitHub есть версия новее
+const RELEASES_API = 'https://api.github.com/repos/Danil-Stenyashin/NEYAMI/releases/latest';
 
 if (IS_WIN) app.setAppUserModelId('ru.neyami.app'); // уведомления и группировка на панели задач Windows
 
@@ -76,6 +78,8 @@ async function start() {
   console.log(`NEYAMI: http://localhost:${port}`);
 
   createTray();
+  setTimeout(checkForUpdate, 8000);
+  setInterval(checkForUpdate, 6 * 3600 * 1000);
   // При автозапуске вместе с Windows стартуем в трей, без окна
   if (!process.argv.includes('--hidden')) createWindow();
 }
@@ -175,6 +179,49 @@ function notify(title, body) {
   if (Notification.isSupported()) new Notification({ title, body, icon: ICON }).show();
 }
 
+// ---------- обновления ----------
+const newer = (a, b) => {
+  const pa = String(a).replace(/^v/, '').split('.').map(Number);
+  const pb = String(b).replace(/^v/, '').split('.').map(Number);
+  for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0);
+  return false;
+};
+
+async function checkForUpdate() {
+  if (process.env.NEYAMI_SMOKE || !app.isPackaged) return;
+  try {
+    const res = await fetch(RELEASES_API, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'NEYAMI' } });
+    if (!res.ok) return;
+    const rel = await res.json();
+    const asset = (rel.assets ?? []).find((a) => /^NEYAMI-Setup-.*\.exe$/.test(a.name));
+    if (!asset || !newer(rel.tag_name, app.getVersion())) return;
+    const fresh = !update || update.version !== rel.tag_name;
+    update = { version: rel.tag_name.replace(/^v/, ''), url: asset.browser_download_url, name: asset.name };
+    updateTrayMenu();
+    if (fresh) notify(`Вышла NEYAMI ${update.version}`, 'Обновить — в меню значка NEYAMI у часов. Ваша музыка и настройки сохранятся.');
+  } catch { /* нет интернета — проверим позже */ }
+}
+
+async function installUpdate() {
+  if (!update) return;
+  const allowed = (u) => { try { return ['github.com', 'githubusercontent.com'].some((h) => new URL(u).hostname === h || new URL(u).hostname.endsWith(`.${h}`)); } catch { return false; } };
+  if (!allowed(update.url)) return;
+  notify('Скачиваю обновление…', `NEYAMI ${update.version} установится и откроется сама.`);
+  try {
+    const res = await fetch(update.url, { headers: { 'User-Agent': 'NEYAMI' } });
+    if (!res.ok || !allowed(res.url)) throw new Error(`ошибка ${res.status}`);
+    const file = path.join(app.getPath('temp'), update.name);
+    fs.writeFileSync(file, Buffer.from(await res.arrayBuffer()));
+    const { spawn } = require('node:child_process');
+    spawn(file, ['--updated'], { detached: true, stdio: 'ignore' }).unref();
+    quitting = true;
+    app.quit();
+  } catch (e) {
+    notify('Не удалось обновить', `Скачайте установщик вручную со страницы релизов. (${e.message})`);
+    shell.openExternal('https://github.com/Danil-Stenyashin/NEYAMI/releases/latest');
+  }
+}
+
 // ---------- трей ----------
 function createTray() {
   // 32 px: Windows сам ужмёт до 16 на обычных экранах и возьмёт как есть на экранах высокой чёткости
@@ -190,6 +237,7 @@ function updateTrayMenu() {
   const phone = phoneUrl();
   const atLogin = app.getLoginItemSettings().openAtLogin;
   tray.setContextMenu(Menu.buildFromTemplate([
+    ...(update ? [{ label: `Обновить до версии ${update.version}`, click: installUpdate }, { type: 'separator' }] : []),
     { label: 'Открыть NEYAMI', click: showWindow },
     { label: 'Играть / пауза', click: () => clickInPage('#p-toggle') },
     { label: 'Следующий трек', click: () => clickInPage('#p-next') },
@@ -209,6 +257,7 @@ function updateTrayMenu() {
       checked: atLogin,
       click: (item) => app.setLoginItemSettings({ openAtLogin: item.checked, args: ['--hidden'] }),
     },
+    { label: `Версия ${app.getVersion()} — проверить обновления`, click: async () => { await checkForUpdate(); if (!update) notify('NEYAMI', 'У вас последняя версия.'); } },
     { type: 'separator' },
     { label: 'Выход', click: () => { quitting = true; app.quit(); } },
   ]));
